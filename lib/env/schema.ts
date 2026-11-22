@@ -8,7 +8,7 @@ import { z } from "zod";
  * `./public.ts` (browser-safe) and `./server.ts` (server-only).
  */
 
-export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+export const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite";
 
 /** Safe to expose to the browser (inlined at build time by Next.js). */
 export const publicEnvSchema = z.object({
