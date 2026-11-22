@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createServerClient } from "@supabase/ssr";
+import { io } from "next/cache";
 import { cookies } from "next/headers";
 
 import { getPublicEnv } from "@/lib/env/public";
@@ -12,6 +13,11 @@ import type { Database } from "@/types/database";
  * across requests.
  */
 export async function createSupabaseServerClient() {
+  // `@supabase/auth-js` reads `Date.now()` for token-expiry checks, so
+  // `await io()` excludes Supabase server calls from Next.js 16 build/runtime
+  // prerenders while resolving immediately on real requests, Server Actions,
+  // and Route Handlers.
+  await io();
   const cookieStore = await cookies();
   const { NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY } =
     getPublicEnv();
