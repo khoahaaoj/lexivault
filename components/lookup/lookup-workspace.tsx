@@ -1,16 +1,32 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { z } from "zod";
 
-import { EntryCard } from "@/components/lookup/entry-card";
+import {
+  EntryCard,
+  InstantPreviewCard,
+  StreamingEntryCard,
+} from "@/components/lookup/entry-card";
 import { entrySenseKey } from "@/lib/dictionary/mappers";
+import {
+  getCachedLookup,
+  markCachedEntrySaved,
+  setCachedLookup,
+} from "@/lib/dictionary/session-cache";
+import type {
+  LookupPreviewData,
+  LookupStreamEvent,
+  PartialLookupPayload,
+} from "@/lib/dictionary/stream";
 import {
   MAX_LOOKUP_TERM_LENGTH,
   lookupTermSchema,
   type LookupApiResponse,
   type LookupEntryResult,
 } from "@/lib/dictionary/validation";
+
+type LookupPhase = "idle" | "connecting" | "preview" | "streaming" | "done";
 
 const QUICK_EXAMPLES = [
   "mitigate",
@@ -61,13 +77,132 @@ function LoadingSkeleton() {
   );
 }
 
+async function executeLookupRequest(params: {
+  term: string;
+  signal: AbortSignal;
+  onEvent: (event: LookupStreamEvent, elapsedMs: number) => void;
+  onFailure: (message: string) => void;
+}) {
+  const { term, signal, onEvent, onFailure } = params;
+  const startedAt = performance.now();
+  let receivedTerminalEvent = false;
+
+  const dispatchEvent = (event: LookupStreamEvent) => {
+    if (signal.aborted) {
+      return;
+    }
+    if (
+      event.type === "cache" ||
+      event.type === "final" ||
+      event.type === "error"
+    ) {
+      receivedTerminalEvent = true;
+    }
+    onEvent(event, Math.round(performance.now() - startedAt));
+  };
+
+  try {
+    const response = await fetch("/api/lookup", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/x-ndjson",
+      },
+      body: JSON.stringify({ term }),
+      signal,
+    });
+
+    if (signal.aborted) {
+      return;
+    }
+
+    if (!response.ok) {
+      let errorMessage = "Unable to look up that term right now.";
+      try {
+        const errData = (await response.json()) as { error?: string };
+        if (errData.error) {
+          errorMessage = errData.error;
+        }
+      } catch {
+        // Non-JSON upstream error body; fall back to generic message.
+      }
+      onFailure(errorMessage);
+      return;
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/x-ndjson") && response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (signal.aborted) {
+          return;
+        }
+
+        if (value) {
+          buffer += decoder.decode(value, { stream: !done });
+        } else if (done) {
+          buffer += decoder.decode();
+        }
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            continue;
+          }
+          dispatchEvent(JSON.parse(trimmed) as LookupStreamEvent);
+        }
+
+        if (done) {
+          const trailing = buffer.trim();
+          if (trailing) {
+            dispatchEvent(JSON.parse(trailing) as LookupStreamEvent);
+          }
+          break;
+        }
+      }
+
+      if (!receivedTerminalEvent && !signal.aborted) {
+        onFailure("Lookup stream ended unexpectedly. Please try again.");
+      }
+    } else {
+      const data = (await response.json()) as LookupApiResponse;
+      dispatchEvent({ type: "final", data });
+    }
+  } catch (caught) {
+    if (
+      signal.aborted ||
+      (caught instanceof Error && caught.name === "AbortError")
+    ) {
+      return;
+    }
+    onFailure("Network error while looking up that term. Please try again.");
+  }
+}
+
 export function LookupWorkspace() {
   const [term, setTerm] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  const [phase, setPhase] = useState<LookupPhase>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<LookupPreviewData | null>(null);
+  const [partial, setPartial] = useState<PartialLookupPayload | null>(null);
   const [result, setResult] = useState<LookupApiResponse | null>(null);
+  const [isSessionHit, setIsSessionHit] = useState(false);
+  const [elapsedMs, setElapsedMs] = useState<number | null>(null);
   const [savingKeys, setSavingKeys] = useState<Record<string, boolean>>({});
   const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
 
   async function runLookup(rawTerm: string) {
     const parsed = lookupTermSchema.safeParse(rawTerm);
@@ -78,50 +213,131 @@ export function LookupWorkspace() {
     }
 
     const normalized = parsed.data;
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+
     setTerm(normalized);
     setError(null);
     setSaveErrors({});
-    setIsLoading(true);
 
-    try {
-      const response = await fetch("/api/lookup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ term: normalized }),
-      });
+    const sessionCached = getCachedLookup(normalized);
+    if (sessionCached) {
+      setPreview(null);
+      setPartial(null);
+      setResult(sessionCached);
+      setIsSessionHit(true);
+      setElapsedMs(0);
+      setPhase("done");
+      return;
+    }
 
-      const data = (await response.json()) as
-        LookupApiResponse | { error?: string };
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
-      if (!response.ok) {
-        setError(
-          "error" in data && data.error
-            ? data.error
-            : "Unable to look up that term right now.",
-        );
-        return;
-      }
+    setPhase("connecting");
+    setPreview(null);
+    setPartial(null);
+    setResult(null);
+    setIsSessionHit(false);
+    setElapsedMs(null);
 
-      setResult(data as LookupApiResponse);
-    } catch {
-      setError("Network error while looking up that term. Please try again.");
-    } finally {
-      setIsLoading(false);
+    let latestPreview: LookupPreviewData | null = null;
+
+    await executeLookupRequest({
+      term: normalized,
+      signal: controller.signal,
+      onEvent: (event, eventElapsedMs) => {
+        switch (event.type) {
+          case "cache": {
+            setResult(event.data);
+            setPreview(null);
+            setPartial(null);
+            setElapsedMs(eventElapsedMs);
+            setPhase("done");
+            setCachedLookup(normalized, event.data);
+            break;
+          }
+          case "preview": {
+            latestPreview = event.data;
+            setPreview(event.data);
+            setPhase((current) =>
+              current === "connecting" ? "preview" : current,
+            );
+            setPartial((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    entries: prev.entries.map((entry) => ({
+                      ...entry,
+                      audio_uk_url:
+                        entry.audio_uk_url ?? event.data.audio_uk_url,
+                      audio_us_url:
+                        entry.audio_us_url ?? event.data.audio_us_url,
+                    })),
+                  }
+                : null,
+            );
+            break;
+          }
+          case "partial": {
+            const mergedEntries = event.data.entries.map((entry) => ({
+              ...entry,
+              audio_uk_url:
+                entry.audio_uk_url ?? latestPreview?.audio_uk_url ?? null,
+              audio_us_url:
+                entry.audio_us_url ?? latestPreview?.audio_us_url ?? null,
+            }));
+            setPartial({
+              query: event.data.query,
+              entries: mergedEntries,
+            });
+            setPhase("streaming");
+            break;
+          }
+          case "final": {
+            setResult(event.data);
+            setPartial(null);
+            setPreview(null);
+            setElapsedMs(eventElapsedMs);
+            setPhase("done");
+            setCachedLookup(normalized, event.data);
+            break;
+          }
+          case "error": {
+            setError(event.error);
+            setPartial(null);
+            setPreview(null);
+            setPhase("idle");
+            break;
+          }
+        }
+      },
+      onFailure: (message) => {
+        setError(message);
+        setPreview(null);
+        setPartial(null);
+        setPhase("idle");
+      },
+    });
+
+    if (abortControllerRef.current === controller) {
+      abortControllerRef.current = null;
+      setPhase((current) =>
+        current === "connecting" ||
+        current === "preview" ||
+        current === "streaming"
+          ? "idle"
+          : current,
+      );
     }
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (isLoading) {
-      return;
-    }
     void runLookup(term);
   }
 
   function handleSelectTerm(nextTerm: string) {
-    if (isLoading) {
-      return;
-    }
     setTerm(nextTerm);
     if (typeof window !== "undefined") {
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -174,6 +390,11 @@ export function LookupWorkspace() {
         return;
       }
 
+      markCachedEntrySaved(entry.word, entry.part_of_speech, {
+        entryId: data.entry_id,
+        srsCardId: data.srs_card_id,
+      });
+
       setResult((prev) => {
         if (!prev) {
           return prev;
@@ -201,6 +422,21 @@ export function LookupWorkspace() {
       setSavingKeys((prev) => ({ ...prev, [key]: false }));
     }
   }
+
+  const isBusy =
+    phase === "connecting" || phase === "preview" || phase === "streaming";
+
+  const sourceBadgeText = result
+    ? isSessionHit
+      ? "Session Cache · Instant"
+      : result.source === "cache"
+        ? "Instant Vault Cache"
+        : elapsedMs !== null
+          ? `AI-Enriched · ${(elapsedMs / 1000).toFixed(1)}s`
+          : "AI-Enriched · Live"
+    : "";
+
+  const isCachedBadge = isSessionHit || result?.source === "cache";
 
   return (
     <div className="flex flex-col gap-6">
@@ -239,7 +475,7 @@ export function LookupWorkspace() {
               spellCheck={false}
               className="w-full rounded-xl border border-border bg-background py-3 pr-10 pl-10 text-base text-foreground transition outline-none placeholder:text-muted/70 focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-sm"
             />
-            {term.length > 0 && !isLoading && (
+            {term.length > 0 && (
               <button
                 type="button"
                 aria-label="Clear search"
@@ -256,10 +492,9 @@ export function LookupWorkspace() {
 
           <button
             type="submit"
-            disabled={isLoading}
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-accent px-5 py-3 text-sm font-medium text-accent-foreground transition hover:opacity-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-60 sm:py-2.5"
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-accent px-5 py-3 text-sm font-medium text-accent-foreground transition hover:opacity-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent sm:py-2.5"
           >
-            {isLoading ? "Looking up…" : "Search"}
+            {isBusy ? "Searching…" : "Search"}
           </button>
         </form>
 
@@ -270,9 +505,8 @@ export function LookupWorkspace() {
             <button
               key={sample}
               type="button"
-              disabled={isLoading}
               onClick={() => handleSelectTerm(sample)}
-              className="rounded-lg border border-border bg-background px-2.5 py-1 font-medium text-foreground transition hover:border-accent/40 hover:text-accent disabled:opacity-50"
+              className="rounded-lg border border-border bg-background px-2.5 py-1 font-medium text-foreground transition hover:border-accent/40 hover:text-accent"
             >
               {sample}
             </button>
@@ -290,11 +524,39 @@ export function LookupWorkspace() {
         </div>
       )}
 
-      {/* Loading skeleton */}
-      {isLoading && <LoadingSkeleton />}
+      {/* Phase 1: Initial connecting skeleton */}
+      {phase === "connecting" && <LoadingSkeleton />}
 
-      {/* Invalid word + "Did you mean?" */}
-      {!isLoading && result && !result.is_valid && (
+      {/* Phase 2: Instant Free Dictionary preview */}
+      {phase === "preview" && preview && (
+        <InstantPreviewCard preview={preview} />
+      )}
+
+      {/* Phase 3: Live streaming partial entries */}
+      {phase === "streaming" && partial && partial.entries.length > 0 && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-muted">
+            <span>
+              Streaming {partial.entries.length}{" "}
+              {partial.entries.length === 1 ? "sense" : "senses"} for{" "}
+              <span className="font-semibold text-foreground">
+                “{partial.query}”
+              </span>
+            </span>
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-accent/10 px-2.5 py-0.5 font-medium text-accent">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+              Streaming live…
+            </span>
+          </div>
+
+          {partial.entries.map((entry, index) => (
+            <StreamingEntryCard key={`${index}-${entry.word}`} entry={entry} />
+          ))}
+        </div>
+      )}
+
+      {/* Phase 4a: Invalid word + "Did you mean?" */}
+      {phase === "done" && result && !result.is_valid && (
         <section className="rounded-2xl border border-border bg-surface p-6 shadow-xs sm:p-7">
           <p className="text-sm text-foreground">
             No valid English dictionary entry found for{" "}
@@ -320,45 +582,46 @@ export function LookupWorkspace() {
         </section>
       )}
 
-      {/* Results list */}
-      {!isLoading && result && result.is_valid && result.entries.length > 0 && (
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-muted">
-            <span>
-              Showing {result.entries.length}{" "}
-              {result.entries.length === 1 ? "sense" : "senses"} for{" "}
-              <span className="font-semibold text-foreground">
-                “{result.query}”
+      {/* Phase 4b: Final results list */}
+      {phase === "done" &&
+        result &&
+        result.is_valid &&
+        result.entries.length > 0 && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-muted">
+              <span>
+                Showing {result.entries.length}{" "}
+                {result.entries.length === 1 ? "sense" : "senses"} for{" "}
+                <span className="font-semibold text-foreground">
+                  “{result.query}”
+                </span>
               </span>
-            </span>
-            <span
-              className={`rounded-full px-2.5 py-0.5 font-medium ${
-                result.source === "cache"
-                  ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                  : "bg-accent/10 text-accent"
-              }`}
-            >
-              {result.source === "cache"
-                ? "Instant Vault Cache"
-                : "AI-Enriched · Live"}
-            </span>
-          </div>
+              <span
+                className={`rounded-full px-2.5 py-0.5 font-medium ${
+                  isCachedBadge
+                    ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                    : "bg-accent/10 text-accent"
+                }`}
+              >
+                {sourceBadgeText}
+              </span>
+            </div>
 
-          {result.entries.map((entry) => {
-            const key = entrySenseKey(entry.word, entry.part_of_speech);
-            return (
-              <EntryCard
-                key={key}
-                entry={entry}
-                isSaving={Boolean(savingKeys[key])}
-                saveError={saveErrors[key]}
-                onSave={(target) => void handleSave(target)}
-                onSelectTerm={handleSelectTerm}
-              />
-            );
-          })}
-        </div>
-      )}
+            {result.entries.map((entry) => {
+              const key = entrySenseKey(entry.word, entry.part_of_speech);
+              return (
+                <EntryCard
+                  key={key}
+                  entry={entry}
+                  isSaving={Boolean(savingKeys[key])}
+                  saveError={saveErrors[key]}
+                  onSave={(target) => void handleSave(target)}
+                  onSelectTerm={handleSelectTerm}
+                />
+              );
+            })}
+          </div>
+        )}
     </div>
   );
 }

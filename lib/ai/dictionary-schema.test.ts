@@ -1,13 +1,19 @@
+import { ThinkingLevel } from "@google/genai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-const { mockGenerateContent, mockGetServerEnv, mockConstructorArgs } =
-  vi.hoisted(() => ({
-    mockGenerateContent: vi.fn(),
-    mockGetServerEnv: vi.fn(),
-    mockConstructorArgs: vi.fn(),
-  }));
+const {
+  mockGenerateContent,
+  mockGenerateContentStream,
+  mockGetServerEnv,
+  mockConstructorArgs,
+} = vi.hoisted(() => ({
+  mockGenerateContent: vi.fn(),
+  mockGenerateContentStream: vi.fn(),
+  mockGetServerEnv: vi.fn(),
+  mockConstructorArgs: vi.fn(),
+}));
 
 vi.mock("@/lib/env/server", () => ({
   getServerEnv: mockGetServerEnv,
@@ -18,6 +24,7 @@ vi.mock("@google/genai", async (importOriginal) => {
   class MockGoogleGenAI {
     models = {
       generateContent: mockGenerateContent,
+      generateContentStream: mockGenerateContentStream,
     };
     constructor(options: { apiKey: string }) {
       mockConstructorArgs(options);
@@ -35,8 +42,12 @@ import {
 } from "@/lib/ai/dictionary-prompt";
 import {
   DictionaryResponseSchema,
+  FALLBACK_GEMINI_MODEL,
   GEMINI_RESPONSE_SCHEMA,
   enrichWordWithGemini,
+  isTransientGeminiError,
+  streamWordWithGemini,
+  supportsMinimalThinking,
 } from "@/lib/ai/dictionary-schema";
 
 const SAMPLE_ENTRY = {
@@ -145,6 +156,32 @@ describe("DictionaryResponseSchema", () => {
   });
 });
 
+describe("supportsMinimalThinking & isTransientGeminiError", () => {
+  it("enables MINIMAL thinking only on Gemini 3.x Flash-Lite models", () => {
+    expect(supportsMinimalThinking("gemini-3.5-flash-lite")).toBe(true);
+    expect(supportsMinimalThinking("gemini-3.1-flash-lite")).toBe(true);
+    expect(supportsMinimalThinking("gemini-3.8-flash")).toBe(false);
+    expect(supportsMinimalThinking("gemini-2.5-flash")).toBe(false);
+  });
+
+  it("classifies 503/504/high-demand/TimeoutError as transient", () => {
+    expect(
+      isTransientGeminiError({ status: 503, message: "UNAVAILABLE" }),
+    ).toBe(true);
+    expect(
+      isTransientGeminiError({
+        message: "This model is currently experiencing high demand",
+      }),
+    ).toBe(true);
+    expect(
+      isTransientGeminiError(new DOMException("Timed out", "TimeoutError")),
+    ).toBe(true);
+    expect(
+      isTransientGeminiError({ status: 400, message: "Bad request" }),
+    ).toBe(false);
+  });
+});
+
 describe("enrichWordWithGemini", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -154,7 +191,7 @@ describe("enrichWordWithGemini", () => {
     });
   });
 
-  it("calls Gemini with lazy server env, structured schema, and temperature 0.2", async () => {
+  it("calls Gemini with MINIMAL thinking, structured schema, temperature 0.2, and abortSignal", async () => {
     const validResponse = {
       is_valid: true,
       suggestion: null,
@@ -181,8 +218,53 @@ describe("enrichWordWithGemini", () => {
         responseMimeType: "application/json",
         responseSchema: GEMINI_RESPONSE_SCHEMA,
         temperature: 0.2,
+        abortSignal: expect.any(AbortSignal),
+        thinkingConfig: {
+          thinkingLevel: ThinkingLevel.MINIMAL,
+        },
       },
     });
+    expect(result).toEqual(validResponse);
+  });
+
+  it("omits thinkingConfig for non-flash-lite models like gemini-3.8-flash", async () => {
+    mockGetServerEnv.mockReturnValue({
+      GEMINI_API_KEY: "test-gemini-key",
+      GEMINI_MODEL: "gemini-3.8-flash",
+    });
+    mockGenerateContent.mockResolvedValue({
+      text: JSON.stringify({
+        is_valid: true,
+        suggestion: null,
+        entries: [SAMPLE_ENTRY],
+      }),
+    });
+
+    await enrichWordWithGemini("mitigate");
+
+    const callConfig = mockGenerateContent.mock.calls[0]?.[0]?.config;
+    expect(callConfig.thinkingConfig).toBeUndefined();
+  });
+
+  it("falls back to gemini-3.1-flash-lite when primary throws 503 UNAVAILABLE", async () => {
+    const validResponse = {
+      is_valid: true,
+      suggestion: null,
+      entries: [SAMPLE_ENTRY],
+    };
+    mockGenerateContent
+      .mockRejectedValueOnce({ status: 503, message: "UNAVAILABLE" })
+      .mockResolvedValueOnce({ text: JSON.stringify(validResponse) });
+
+    const result = await enrichWordWithGemini("mitigate");
+
+    expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+    expect(mockGenerateContent.mock.calls[0]?.[0]?.model).toBe(
+      "gemini-3.5-flash-lite",
+    );
+    expect(mockGenerateContent.mock.calls[1]?.[0]?.model).toBe(
+      FALLBACK_GEMINI_MODEL,
+    );
     expect(result).toEqual(validResponse);
   });
 
@@ -202,5 +284,85 @@ describe("enrichWordWithGemini", () => {
       }),
     });
     await expect(enrichWordWithGemini("mitigate")).rejects.toThrow();
+  });
+});
+
+describe("streamWordWithGemini", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetServerEnv.mockReturnValue({
+      GEMINI_API_KEY: "test-gemini-key",
+      GEMINI_MODEL: "gemini-3.5-flash-lite",
+    });
+  });
+
+  it("streams chunks progressively to onChunk and returns validated DTO", async () => {
+    const validResponse = {
+      is_valid: true,
+      suggestion: null,
+      entries: [SAMPLE_ENTRY],
+    };
+    const json = JSON.stringify(validResponse);
+    const midpoint = Math.floor(json.length / 2);
+
+    mockGenerateContentStream.mockResolvedValue(
+      (async function* () {
+        yield { text: json.slice(0, midpoint) };
+        yield { text: json.slice(midpoint) };
+      })(),
+    );
+
+    const chunks: string[] = [];
+    const result = await streamWordWithGemini("mitigate", {
+      onChunk: (accumulated) => chunks.push(accumulated),
+    });
+
+    expect(chunks).toEqual([json.slice(0, midpoint), json]);
+    expect(mockGenerateContentStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "gemini-3.5-flash-lite",
+        config: expect.objectContaining({
+          thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+        }),
+      }),
+    );
+    expect(result).toEqual(validResponse);
+  });
+
+  it("invokes onReset and retries on gemini-3.1-flash-lite if stream fails with 503", async () => {
+    const validResponse = {
+      is_valid: true,
+      suggestion: null,
+      entries: [SAMPLE_ENTRY],
+    };
+    const json = JSON.stringify(validResponse);
+
+    mockGenerateContentStream
+      .mockResolvedValueOnce(
+        (async function* () {
+          yield { text: '{"is_valid":true,' };
+          throw Object.assign(new Error("high demand"), { status: 503 });
+        })(),
+      )
+      .mockResolvedValueOnce(
+        (async function* () {
+          yield { text: json };
+        })(),
+      );
+
+    const onReset = vi.fn();
+    const chunks: string[] = [];
+    const result = await streamWordWithGemini("mitigate", {
+      onChunk: (acc) => chunks.push(acc),
+      onReset,
+    });
+
+    expect(onReset).toHaveBeenCalledTimes(1);
+    expect(mockGenerateContentStream).toHaveBeenCalledTimes(2);
+    expect(mockGenerateContentStream.mock.calls[1]?.[0]?.model).toBe(
+      FALLBACK_GEMINI_MODEL,
+    );
+    expect(chunks).toEqual(['{"is_valid":true,', json]);
+    expect(result).toEqual(validResponse);
   });
 });

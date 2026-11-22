@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  buildLookupPreview,
   extractAudioUrls,
   fetchFreeDictionaryReference,
   normalizeAudioUrl,
@@ -225,5 +226,62 @@ describe("fetchFreeDictionaryReference", () => {
     });
     expect(warnSpy).toHaveBeenCalledTimes(1);
     warnSpy.mockRestore();
+  });
+});
+
+describe("buildLookupPreview", () => {
+  it("extracts word, IPA, audio URLs, and top 2 meanings with up to 2 definitions each", () => {
+    const preview = buildLookupPreview("mitigate", {
+      audioUkUrl: "https://cdn.example.com/mitigate-uk.mp3",
+      audioUsUrl: "https://cdn.example.com/mitigate-us.mp3",
+      referenceJson: JSON.stringify({
+        word: "Mitigate",
+        phonetics: ["/ˈmɪt.ɪ.ɡeɪt/", "/ˈmɪt̬.ə.ɡeɪt/"],
+        meanings: [
+          { partOfSpeech: "verb", definitions: ["Def 1", "Def 2", "Def 3"] },
+          { partOfSpeech: "adjective", definitions: ["Adj 1"] },
+          { partOfSpeech: "noun", definitions: ["Noun 1 should be skipped"] },
+        ],
+      }),
+    });
+
+    expect(preview).toEqual({
+      query: "mitigate",
+      word: "mitigate",
+      ipa_texts: ["/ˈmɪt.ɪ.ɡeɪt/", "/ˈmɪt̬.ə.ɡeɪt/"],
+      audio_uk_url: "https://cdn.example.com/mitigate-uk.mp3",
+      audio_us_url: "https://cdn.example.com/mitigate-us.mp3",
+      meanings: [
+        { part_of_speech: "verb", definitions: ["Def 1", "Def 2"] },
+        { part_of_speech: "adjective", definitions: ["Adj 1"] },
+      ],
+    });
+  });
+
+  it("supports audio-only results without referenceJson", () => {
+    const preview = buildLookupPreview("resilient", {
+      audioUkUrl: "https://cdn.example.com/resilient-uk.mp3",
+      audioUsUrl: null,
+      referenceJson: null,
+    });
+
+    expect(preview).toEqual({
+      query: "resilient",
+      word: "resilient",
+      ipa_texts: [],
+      audio_uk_url: "https://cdn.example.com/resilient-uk.mp3",
+      audio_us_url: null,
+      meanings: [],
+    });
+  });
+
+  it("returns null when no audio, IPA, or meanings are present", () => {
+    expect(
+      buildLookupPreview("bite the bullet", {
+        audioUkUrl: null,
+        audioUsUrl: null,
+        referenceJson: null,
+      }),
+    ).toBeNull();
   });
 });

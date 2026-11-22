@@ -1,5 +1,11 @@
 import "server-only";
-import { GoogleGenAI, Type, type Schema } from "@google/genai";
+import {
+  GoogleGenAI,
+  ThinkingLevel,
+  Type,
+  type GenerateContentConfig,
+  type Schema,
+} from "@google/genai";
 import { z } from "zod";
 
 import { getServerEnv } from "@/lib/env/server";
@@ -7,6 +13,86 @@ import {
   DICTIONARY_SYSTEM_PROMPT,
   buildDictionaryUserPrompt,
 } from "./dictionary-prompt";
+
+export const FALLBACK_GEMINI_MODEL = "gemini-3.1-flash-lite";
+
+const PRIMARY_WITH_FALLBACK_TIMEOUT_MS = 12_000;
+const STANDALONE_TIMEOUT_MS = 18_000;
+const GEMINI_3_FLASH_LITE_PATTERN = /^gemini-3(?:\.\d+)?-flash-lite(?:$|-)/i;
+
+/**
+ * Gemini 3.x Flash-Lite models support `ThinkingLevel.MINIMAL`, which cuts
+ * reasoning overhead and reduces latency without harming structured output.
+ * Other models (e.g. `gemini-3.8-flash`) reject `MINIMAL` with 400.
+ */
+export function supportsMinimalThinking(model: string): boolean {
+  return GEMINI_3_FLASH_LITE_PATTERN.test(model.trim());
+}
+
+/**
+ * Returns true for transient upstream availability or timeout errors that
+ * should trigger an automatic fallback attempt (when the caller did not abort).
+ */
+export function isTransientGeminiError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const name =
+    "name" in error && typeof error.name === "string" ? error.name : "";
+  if (name === "AbortError" || name === "TimeoutError") {
+    return true;
+  }
+
+  const status =
+    "status" in error && typeof error.status === "number" ? error.status : null;
+  if (status === 503 || status === 504) {
+    return true;
+  }
+
+  const message =
+    "message" in error && typeof error.message === "string"
+      ? error.message
+      : "";
+  return (
+    message.includes("503") ||
+    message.includes("504") ||
+    message.includes("UNAVAILABLE") ||
+    message.includes("DEADLINE_EXCEEDED") ||
+    message.toLowerCase().includes("high demand")
+  );
+}
+
+function createAttemptSignal(
+  timeoutMs: number,
+  callerSignal?: AbortSignal,
+): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  return callerSignal
+    ? AbortSignal.any([callerSignal, timeoutSignal])
+    : timeoutSignal;
+}
+
+function buildGeminiConfig(
+  model: string,
+  abortSignal?: AbortSignal,
+): GenerateContentConfig {
+  const config: GenerateContentConfig = {
+    systemInstruction: DICTIONARY_SYSTEM_PROMPT,
+    responseMimeType: "application/json",
+    responseSchema: GEMINI_RESPONSE_SCHEMA,
+    temperature: 0.2,
+    ...(abortSignal ? { abortSignal } : {}),
+  };
+
+  if (supportsMinimalThinking(model)) {
+    config.thinkingConfig = {
+      thinkingLevel: ThinkingLevel.MINIMAL,
+    };
+  }
+
+  return config;
+}
 
 export const DictionaryEntrySchema = z.object({
   word: z.string().min(1),
@@ -141,29 +227,116 @@ export const GEMINI_RESPONSE_SCHEMA: Schema = {
   required: ["is_valid", "suggestion", "entries"],
 };
 
-export async function enrichWordWithGemini(
-  term: string,
-  referenceJson?: string | null,
-): Promise<DictionaryResponseDTO> {
-  const { GEMINI_API_KEY, GEMINI_MODEL } = getServerEnv();
-
-  const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents: buildDictionaryUserPrompt(term, referenceJson),
-    config: {
-      systemInstruction: DICTIONARY_SYSTEM_PROMPT,
-      responseMimeType: "application/json",
-      responseSchema: GEMINI_RESPONSE_SCHEMA,
-      temperature: 0.2,
-    },
-  });
-
-  const rawText = response.text;
+function parseAndValidateGeminiJson(
+  rawText: string | undefined,
+): DictionaryResponseDTO {
   if (!rawText) {
     throw new Error("Empty response from Gemini API");
   }
-
   const parsed: unknown = JSON.parse(rawText);
   return DictionaryResponseSchema.parse(parsed);
+}
+
+async function executeWithFallback<T>(
+  primaryModel: string,
+  callerSignal: AbortSignal | undefined,
+  runAttempt: (model: string, abortSignal: AbortSignal) => Promise<T>,
+  onFallback?: () => void,
+): Promise<T> {
+  const canFallback = primaryModel !== FALLBACK_GEMINI_MODEL;
+  const primaryTimeoutMs = canFallback
+    ? PRIMARY_WITH_FALLBACK_TIMEOUT_MS
+    : STANDALONE_TIMEOUT_MS;
+
+  try {
+    return await runAttempt(
+      primaryModel,
+      createAttemptSignal(primaryTimeoutMs, callerSignal),
+    );
+  } catch (error) {
+    if (
+      canFallback &&
+      !callerSignal?.aborted &&
+      isTransientGeminiError(error)
+    ) {
+      onFallback?.();
+      return runAttempt(
+        FALLBACK_GEMINI_MODEL,
+        createAttemptSignal(STANDALONE_TIMEOUT_MS, callerSignal),
+      );
+    }
+    throw error;
+  }
+}
+
+export type EnrichWordOptions = {
+  signal?: AbortSignal;
+};
+
+export async function enrichWordWithGemini(
+  term: string,
+  referenceJson?: string | null,
+  options?: EnrichWordOptions,
+): Promise<DictionaryResponseDTO> {
+  const { GEMINI_API_KEY, GEMINI_MODEL } = getServerEnv();
+  const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+  const contents = buildDictionaryUserPrompt(term, referenceJson);
+
+  const rawText = await executeWithFallback(
+    GEMINI_MODEL,
+    options?.signal,
+    async (model, abortSignal) => {
+      const response = await ai.models.generateContent({
+        model,
+        contents,
+        config: buildGeminiConfig(model, abortSignal),
+      });
+      return response.text;
+    },
+  );
+
+  return parseAndValidateGeminiJson(rawText);
+}
+
+export type StreamWordOptions = {
+  referenceJson?: string | null;
+  signal?: AbortSignal;
+  onChunk?: (accumulatedText: string) => void;
+  onReset?: () => void;
+};
+
+export async function streamWordWithGemini(
+  term: string,
+  options?: StreamWordOptions,
+): Promise<DictionaryResponseDTO> {
+  const { GEMINI_API_KEY, GEMINI_MODEL } = getServerEnv();
+  const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+  const contents = buildDictionaryUserPrompt(term, options?.referenceJson);
+
+  const rawText = await executeWithFallback(
+    GEMINI_MODEL,
+    options?.signal,
+    async (model, abortSignal) => {
+      const stream = await ai.models.generateContentStream({
+        model,
+        contents,
+        config: buildGeminiConfig(model, abortSignal),
+      });
+
+      let accumulated = "";
+      for await (const chunk of stream) {
+        if (options?.signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+        if (chunk.text) {
+          accumulated += chunk.text;
+          options?.onChunk?.(accumulated);
+        }
+      }
+      return accumulated;
+    },
+    options?.onReset,
+  );
+
+  return parseAndValidateGeminiJson(rawText);
 }

@@ -1,27 +1,49 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { enrichWordWithGemini } from "@/lib/ai/dictionary-schema";
+import {
+  enrichWordWithGemini,
+  streamWordWithGemini,
+  type DictionaryResponseDTO,
+} from "@/lib/ai/dictionary-schema";
 import { requireApiUser } from "@/lib/auth/session";
-import { fetchFreeDictionaryReference } from "@/lib/dictionary/free-dictionary";
+import {
+  buildLookupPreview,
+  fetchFreeDictionaryReference,
+  type FreeDictionaryResult,
+} from "@/lib/dictionary/free-dictionary";
 import {
   buildAiLookupEntries,
   mapCachedEntryToResult,
 } from "@/lib/dictionary/mappers";
+import { parsePartialDictionaryResponse } from "@/lib/dictionary/partial-json";
+import type { LookupStreamEvent } from "@/lib/dictionary/stream";
 import {
   lookupRequestSchema,
+  normalizeLookupTerm,
   type LookupApiResponse,
 } from "@/lib/dictionary/validation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
+export const maxDuration = 30;
+
+const PARTIAL_EMIT_INTERVAL_MS = 80;
+const NDJSON_HEADERS = {
+  "Content-Type": "application/x-ndjson; charset=utf-8",
+  "Cache-Control": "no-cache, no-transform",
+  "X-Accel-Buffering": "no",
+} as const;
+
 function getErrorDetails(error: unknown): {
+  name: string;
   status: number | null;
   message: string;
 } {
   if (!error || typeof error !== "object") {
-    return { status: null, message: "" };
+    return { name: "", status: null, message: "" };
   }
   return {
+    name: "name" in error && typeof error.name === "string" ? error.name : "",
     status:
       "status" in error && typeof error.status === "number"
         ? error.status
@@ -44,8 +66,9 @@ function isRateLimitError(error: unknown): boolean {
 }
 
 function isServiceUnavailableError(error: unknown): boolean {
-  const { status, message } = getErrorDetails(error);
+  const { name, status, message } = getErrorDetails(error);
   return (
+    name === "TimeoutError" ||
     status === 503 ||
     status === 504 ||
     message.includes("503") ||
@@ -54,6 +77,110 @@ function isServiceUnavailableError(error: unknown): boolean {
     message.includes("DEADLINE_EXCEEDED") ||
     message.toLowerCase().includes("high demand")
   );
+}
+
+function classifyLookupError(error: unknown): {
+  status: number;
+  error: string;
+} {
+  if (isRateLimitError(error)) {
+    return {
+      status: 429,
+      error:
+        "AI lookup quota is temporarily busy. Please wait a moment and try again.",
+    };
+  }
+
+  if (isServiceUnavailableError(error)) {
+    return {
+      status: 503,
+      error:
+        "Gemini model is temporarily busy or timed out. Please retry in a few seconds.",
+    };
+  }
+
+  console.error("POST /api/lookup failed:", error);
+  return {
+    status: 502,
+    error: "Unable to look up that term right now. Please try again.",
+  };
+}
+
+async function hydrateLemmaSavedRows(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  userId: string,
+  term: string,
+  aiEntries: DictionaryResponseDTO["entries"],
+) {
+  // Cache miss already proved there are no saved rows for `word === term`.
+  // Only query Supabase if Gemini normalized an inflected query to another lemma.
+  const lemmaWordsToQuery = Array.from(
+    new Set(
+      aiEntries
+        .map((entry) => {
+          const normalized = normalizeLookupTerm(entry.word);
+          return normalized.length >= 1 && normalized.length <= 80
+            ? normalized
+            : term;
+        })
+        .filter((word) => word !== term),
+    ),
+  );
+
+  if (lemmaWordsToQuery.length === 0) {
+    return [];
+  }
+
+  const { data: existingLemmaRows } = await supabase
+    .from("entries")
+    .select("id, word, part_of_speech, srs_cards(id)")
+    .eq("user_id", userId)
+    .in("word", lemmaWordsToQuery);
+
+  return existingLemmaRows ?? [];
+}
+
+async function finalizeLookupResponse(params: {
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>;
+  userId: string;
+  term: string;
+  freeDict: FreeDictionaryResult;
+  gemini: DictionaryResponseDTO;
+}): Promise<LookupApiResponse> {
+  const { supabase, userId, term, freeDict, gemini } = params;
+
+  if (!gemini.is_valid || gemini.entries.length === 0) {
+    return {
+      source: "ai",
+      query: term,
+      is_valid: false,
+      suggestion: gemini.suggestion ?? null,
+      entries: [],
+    };
+  }
+
+  const existingLemmaRows = await hydrateLemmaSavedRows(
+    supabase,
+    userId,
+    term,
+    gemini.entries,
+  );
+
+  const entries = buildAiLookupEntries({
+    fallbackWord: term,
+    aiEntries: gemini.entries,
+    audioUkUrl: freeDict.audioUkUrl,
+    audioUsUrl: freeDict.audioUsUrl,
+    savedRows: existingLemmaRows,
+  });
+
+  return {
+    source: "ai",
+    query: term,
+    is_valid: true,
+    suggestion: null,
+    entries,
+  };
 }
 
 export async function POST(request: Request) {
@@ -83,6 +210,8 @@ export async function POST(request: Request) {
   }
 
   const { term } = parsed.data;
+  const wantsStream =
+    request.headers.get("accept")?.includes("application/x-ndjson") ?? false;
   const supabase = await createSupabaseServerClient();
 
   // 1. Cache-first lookup in the authenticated user's entries table.
@@ -102,95 +231,170 @@ export async function POST(request: Request) {
   }
 
   if (cachedRows && cachedRows.length > 0) {
-    const responsePayload: LookupApiResponse = {
+    const cachePayload: LookupApiResponse = {
       source: "cache",
       query: term,
       is_valid: true,
       suggestion: null,
       entries: cachedRows.map(mapCachedEntryToResult),
     };
-    return NextResponse.json(responsePayload);
+
+    if (wantsStream) {
+      const event: LookupStreamEvent = { type: "cache", data: cachePayload };
+      return new Response(`${JSON.stringify(event)}\n`, {
+        headers: NDJSON_HEADERS,
+      });
+    }
+
+    return NextResponse.json(cachePayload);
   }
 
-  // 2. Cache miss -> fetch Free Dictionary API grounding + real MP3 audio URLs,
-  //    then enrich with Gemini server-side.
-  try {
-    const freeDict = await fetchFreeDictionaryReference(term);
-    const gemini = await enrichWordWithGemini(term, freeDict.referenceJson);
+  // 2a. Non-streaming JSON mode (backwards-compatible): run Free Dictionary + Gemini in parallel.
+  if (!wantsStream) {
+    try {
+      const [freeDict, gemini] = await Promise.all([
+        fetchFreeDictionaryReference(term),
+        enrichWordWithGemini(term, null, { signal: request.signal }),
+      ]);
 
-    if (!gemini.is_valid || gemini.entries.length === 0) {
-      const invalidPayload: LookupApiResponse = {
-        source: "ai",
-        query: term,
-        is_valid: false,
-        suggestion: gemini.suggestion ?? null,
-        entries: [],
+      const responsePayload = await finalizeLookupResponse({
+        supabase,
+        userId: auth.user.id,
+        term,
+        freeDict,
+        gemini,
+      });
+      return NextResponse.json(responsePayload);
+    } catch (error) {
+      const mapped = classifyLookupError(error);
+      return NextResponse.json(
+        { error: mapped.error },
+        { status: mapped.status },
+      );
+    }
+  }
+
+  // 2b. Streaming NDJSON mode: start Free Dictionary + Gemini in parallel and push
+  //     instant preview + incremental partial entries as soon as chunks arrive.
+  const encoder = new TextEncoder();
+  let closed = false;
+  let finished = false;
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let latestFreeDict: FreeDictionaryResult | null = null;
+      let lastPartialEmitAt = 0;
+
+      const send = (event: LookupStreamEvent) => {
+        if (closed) {
+          return;
+        }
+        try {
+          controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+        } catch {
+          closed = true;
+        }
       };
-      return NextResponse.json(invalidPayload);
-    }
 
-    const preliminaryEntries = buildAiLookupEntries({
-      fallbackWord: term,
-      aiEntries: gemini.entries,
-      audioUkUrl: freeDict.audioUkUrl,
-      audioUsUrl: freeDict.audioUsUrl,
-      savedRows: [],
-    });
+      const freeDictPromise = fetchFreeDictionaryReference(term);
+      void freeDictPromise.then((freeDict) => {
+        latestFreeDict = freeDict;
+        if (finished || closed) {
+          return;
+        }
+        const preview = buildLookupPreview(term, freeDict);
+        if (preview) {
+          send({ type: "preview", data: preview });
+        }
+      });
 
-    const uniqueWords = Array.from(
-      new Set(preliminaryEntries.map((entry) => entry.word)),
-    );
+      try {
+        const gemini = await streamWordWithGemini(term, {
+          signal: request.signal,
+          onReset: () => {
+            lastPartialEmitAt = 0;
+          },
+          onChunk: (accumulated) => {
+            if (closed || finished) {
+              return;
+            }
+            const now = Date.now();
+            if (now - lastPartialEmitAt < PARTIAL_EMIT_INTERVAL_MS) {
+              return;
+            }
 
-    const { data: existingLemmaRows } =
-      uniqueWords.length > 0
-        ? await supabase
-            .from("entries")
-            .select("id, word, part_of_speech, srs_cards(id)")
-            .eq("user_id", auth.user.id)
-            .in("word", uniqueWords)
-        : { data: [] };
+            const partial = parsePartialDictionaryResponse(accumulated);
+            if (
+              !partial ||
+              partial.is_valid === false ||
+              partial.entries.length === 0
+            ) {
+              return;
+            }
 
-    const entries = buildAiLookupEntries({
-      fallbackWord: term,
-      aiEntries: gemini.entries,
-      audioUkUrl: freeDict.audioUkUrl,
-      audioUsUrl: freeDict.audioUsUrl,
-      savedRows: existingLemmaRows ?? [],
-    });
+            const hasSubstantiveContent = partial.entries.some(
+              (entry) =>
+                entry.word.length > 0 &&
+                (entry.definition_en.trim().length > 0 ||
+                  entry.explanation_vi.trim().length > 0),
+            );
+            if (!hasSubstantiveContent) {
+              return;
+            }
 
-    const responsePayload: LookupApiResponse = {
-      source: "ai",
-      query: term,
-      is_valid: true,
-      suggestion: null,
-      entries,
-    };
-    return NextResponse.json(responsePayload);
-  } catch (error) {
-    if (isRateLimitError(error)) {
-      return NextResponse.json(
-        {
-          error:
-            "AI lookup quota is temporarily busy. Please wait a moment and try again.",
-        },
-        { status: 429 },
-      );
-    }
+            lastPartialEmitAt = now;
+            const entries = partial.entries.map((entry) => ({
+              ...entry,
+              audio_uk_url: latestFreeDict?.audioUkUrl ?? null,
+              audio_us_url: latestFreeDict?.audioUsUrl ?? null,
+            }));
 
-    if (isServiceUnavailableError(error)) {
-      return NextResponse.json(
-        {
-          error:
-            "Gemini model is temporarily busy or timed out. Please retry in a few seconds.",
-        },
-        { status: 503 },
-      );
-    }
+            send({
+              type: "partial",
+              data: {
+                query: term,
+                entries,
+              },
+            });
+          },
+        });
 
-    console.error("POST /api/lookup failed:", error);
-    return NextResponse.json(
-      { error: "Unable to look up that term right now. Please try again." },
-      { status: 502 },
-    );
-  }
+        finished = true;
+        const freeDict = await freeDictPromise;
+        const responsePayload = await finalizeLookupResponse({
+          supabase,
+          userId: auth.user.id,
+          term,
+          freeDict,
+          gemini,
+        });
+        send({ type: "final", data: responsePayload });
+      } catch (error) {
+        finished = true;
+        if (!request.signal.aborted) {
+          const mapped = classifyLookupError(error);
+          send({
+            type: "error",
+            error: mapped.error,
+            status: mapped.status,
+          });
+        }
+      } finally {
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          // Stream may already be closed/cancelled by the client.
+        }
+      }
+    },
+    cancel() {
+      closed = true;
+      finished = true;
+    },
+  });
+
+  return new Response(stream, {
+    headers: NDJSON_HEADERS,
+  });
 }

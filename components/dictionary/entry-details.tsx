@@ -37,6 +37,10 @@ export type EntryDisplayData = {
   examples: ExampleSentence[];
 };
 
+export type PartialEntryDisplayData = Omit<EntryDisplayData, "cefr_level"> & {
+  cefr_level: CefrLevel | null;
+};
+
 function SpeakerIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -166,9 +170,11 @@ export function PronunciationButtons({
 export function EntryDetailSections({
   entry,
   onSelectTerm,
+  isStreaming = false,
 }: {
-  entry: EntryDisplayData;
+  entry: EntryDisplayData | PartialEntryDisplayData;
   onSelectTerm?: (term: string) => void;
+  isStreaming?: boolean;
 }) {
   return (
     <div className="space-y-5">
@@ -176,18 +182,29 @@ export function EntryDetailSections({
         <h3 className="text-xs font-semibold tracking-wider text-muted uppercase">
           English Definition
         </h3>
-        <p className="mt-1.5 text-base leading-relaxed font-medium text-foreground">
-          {entry.definition_en}
-        </p>
+        {entry.definition_en ? (
+          <p className="mt-1.5 text-base leading-relaxed font-medium text-foreground">
+            {entry.definition_en}
+          </p>
+        ) : isStreaming ? (
+          <div className="mt-2 h-5 w-4/5 animate-pulse rounded bg-background" />
+        ) : null}
       </section>
 
       <section aria-label="Vietnamese explanation">
         <h3 className="text-xs font-semibold tracking-wider text-muted uppercase">
           Giải thích tiếng Việt
         </h3>
-        <p className="mt-1.5 text-sm leading-relaxed text-foreground/90 sm:text-base">
-          {entry.explanation_vi}
-        </p>
+        {entry.explanation_vi ? (
+          <p className="mt-1.5 text-sm leading-relaxed text-foreground/90 sm:text-base">
+            {entry.explanation_vi}
+          </p>
+        ) : isStreaming ? (
+          <div className="mt-2 space-y-2">
+            <div className="h-4 w-full animate-pulse rounded bg-background" />
+            <div className="h-4 w-5/6 animate-pulse rounded bg-background" />
+          </div>
+        ) : null}
       </section>
 
       {entry.nuance_note_vi && (
@@ -210,16 +227,20 @@ export function EntryDetailSections({
             Collocations
           </h3>
           <div className="mt-2 flex flex-wrap gap-2">
-            {entry.collocations.map((collocation) => (
+            {entry.collocations.map((collocation, index) => (
               <div
-                key={`${collocation.phrase}-${collocation.meaning_vi}`}
+                key={`${index}-${collocation.phrase}`}
                 className="rounded-xl border border-border bg-background px-3 py-1.5 text-xs"
               >
                 <span className="font-semibold text-foreground">
                   {collocation.phrase}
                 </span>
-                <span className="mx-1.5 text-muted">·</span>
-                <span className="text-muted">{collocation.meaning_vi}</span>
+                {collocation.meaning_vi && (
+                  <>
+                    <span className="mx-1.5 text-muted">·</span>
+                    <span className="text-muted">{collocation.meaning_vi}</span>
+                  </>
+                )}
               </div>
             ))}
           </div>
@@ -237,8 +258,11 @@ export function EntryDetailSections({
                 Synonyms &amp; Nuance
               </h3>
               <ul className="mt-2.5 space-y-2.5">
-                {entry.synonyms.map((syn) => (
-                  <li key={syn.word} className="text-xs leading-relaxed">
+                {entry.synonyms.map((syn, index) => (
+                  <li
+                    key={`${index}-${syn.word}`}
+                    className="text-xs leading-relaxed"
+                  >
                     {onSelectTerm ? (
                       <button
                         type="button"
@@ -252,7 +276,9 @@ export function EntryDetailSections({
                         {syn.word}
                       </span>
                     )}
-                    <span className="text-muted"> — {syn.difference_vi}</span>
+                    {syn.difference_vi && (
+                      <span className="text-muted"> — {syn.difference_vi}</span>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -268,10 +294,10 @@ export function EntryDetailSections({
                 Antonyms
               </h3>
               <div className="mt-2.5 flex flex-wrap gap-2">
-                {entry.antonyms.map((ant) =>
+                {entry.antonyms.map((ant, index) =>
                   onSelectTerm ? (
                     <button
-                      key={ant.word}
+                      key={`${index}-${ant.word}`}
                       type="button"
                       onClick={() => onSelectTerm(ant.word)}
                       className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 py-1 text-xs transition hover:border-accent/40"
@@ -279,17 +305,21 @@ export function EntryDetailSections({
                       <span className="font-semibold text-foreground">
                         {ant.word}
                       </span>
-                      <span className="text-muted">({ant.meaning_vi})</span>
+                      {ant.meaning_vi && (
+                        <span className="text-muted">({ant.meaning_vi})</span>
+                      )}
                     </button>
                   ) : (
                     <span
-                      key={ant.word}
+                      key={`${index}-${ant.word}`}
                       className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 py-1 text-xs"
                     >
                       <span className="font-semibold text-foreground">
                         {ant.word}
                       </span>
-                      <span className="text-muted">({ant.meaning_vi})</span>
+                      {ant.meaning_vi && (
+                        <span className="text-muted">({ant.meaning_vi})</span>
+                      )}
                     </span>
                   ),
                 )}
@@ -313,9 +343,11 @@ export function EntryDetailSections({
                 <p className="text-sm font-medium text-foreground">
                   {example.en}
                 </p>
-                <p className="mt-0.5 text-xs leading-relaxed text-muted sm:text-sm">
-                  {example.vi}
-                </p>
+                {example.vi && (
+                  <p className="mt-0.5 text-xs leading-relaxed text-muted sm:text-sm">
+                    {example.vi}
+                  </p>
+                )}
               </li>
             ))}
           </ul>
