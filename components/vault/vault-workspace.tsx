@@ -513,7 +513,7 @@ export function VaultWorkspace() {
         >
           <div
             onClick={(event) => event.stopPropagation()}
-            className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-t-2xl border border-border bg-surface p-5 shadow-xl sm:rounded-2xl sm:p-7"
+            className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-t-2xl border border-border bg-surface p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-xl sm:rounded-2xl sm:p-7"
           >
             <div className="flex items-start justify-between gap-4 border-b border-border pb-4">
               <div className="space-y-2.5">

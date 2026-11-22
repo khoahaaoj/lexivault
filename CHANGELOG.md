@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-22
+
+Phase 5 — PWA polish, architecture documentation, security headers, and v1.0.0 production release.
+
+### Added
+
+- Web App Manifest (`public/manifest.json`) with standalone display mode, theme colors, and app shortcuts (`/`, `/review`, `/vault`).
+- Custom LexiVault app icons (`public/icons/icon.svg`, `icon-192x192.png`, `icon-512x512.png`, `icon-maskable-512x512.png`, and `apple-touch-icon.png`).
+- Next.js `Viewport` and Apple Web App metadata in `app/layout.tsx`.
+- Global HTTP security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`) in `next.config.ts`.
+- Branded `app/not-found.tsx` and `app/error.tsx` fallback pages.
+- Portfolio-ready `README.md` with Mermaid system architecture diagram, schema/SM-2 overview, screenshots section, and Vercel Free-Tier deployment checklist.
+
+### Changed
+
+- Added mobile PWA touch ergonomics (`touch-action: manipulation`, tap highlight cleanup) and `env(safe-area-inset-bottom)` spacing across the bottom navigation bar and Vault detail sheet.
+
 ## [0.4.0] - 2026-11-22
 
 Phase 4 — SM-2 spaced repetition engine, unit tests, interactive Flashcard Review UI, and Vocabulary Vault.
@@ -73,7 +90,8 @@ Phase 1 — project scaffold, Git hygiene and CI.
 - GitHub Actions CI running format check, lint, typecheck and test.
 - `.env.example` template, hardened `.gitignore`, README and MIT license.
 
-[Unreleased]: https://github.com/khoahaaoj/lexivault/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/khoahaaoj/lexivault/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/khoahaaoj/lexivault/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/khoahaaoj/lexivault/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/khoahaaoj/lexivault/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/khoahaaoj/lexivault/compare/v0.2.0...v0.2.1

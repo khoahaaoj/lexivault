@@ -12,7 +12,7 @@ export function AppShell({
   children: ReactNode;
 }) {
   return (
-    <div className="flex min-h-full flex-1 flex-col pb-20 sm:pb-0">
+    <div className="flex min-h-full flex-1 flex-col pb-24 sm:pb-0">
       {/* Desktop top navbar */}
       <header className="sticky top-0 z-20 border-b border-border bg-surface/90 backdrop-blur">
         <div className="mx-auto flex h-16 w-full max-w-4xl items-center justify-between px-4 sm:px-6">
