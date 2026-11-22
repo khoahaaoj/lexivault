@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_GEMINI_MODEL,
+  parseAuthEnv,
   parsePublicEnv,
   parseServerEnv,
 } from "@/lib/env/schema";
@@ -26,6 +27,41 @@ describe("parsePublicEnv", () => {
     expect(() =>
       parsePublicEnv({ ...valid, NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "" }),
     ).toThrow(/NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY/);
+  });
+});
+
+describe("parseAuthEnv", () => {
+  it("returns null when ALLOWED_EMAILS is unset or blank", () => {
+    expect(parseAuthEnv({})).toEqual({ ALLOWED_EMAILS: null });
+    expect(parseAuthEnv({ ALLOWED_EMAILS: "" })).toEqual({
+      ALLOWED_EMAILS: null,
+    });
+    expect(parseAuthEnv({ ALLOWED_EMAILS: "   " })).toEqual({
+      ALLOWED_EMAILS: null,
+    });
+  });
+
+  it("normalizes, trims, and deduplicates comma-separated emails", () => {
+    expect(
+      parseAuthEnv({
+        ALLOWED_EMAILS:
+          " Owner@Example.com, partner@example.com , owner@example.com ",
+      }),
+    ).toEqual({
+      ALLOWED_EMAILS: ["owner@example.com", "partner@example.com"],
+    });
+  });
+
+  it("rejects malformed emails in ALLOWED_EMAILS", () => {
+    expect(() =>
+      parseAuthEnv({ ALLOWED_EMAILS: "owner@example.com, not-an-email" }),
+    ).toThrow(/ALLOWED_EMAILS/);
+  });
+
+  it("rejects bare commas without any email", () => {
+    expect(() => parseAuthEnv({ ALLOWED_EMAILS: " , , " })).toThrow(
+      /ALLOWED_EMAILS/,
+    );
   });
 });
 

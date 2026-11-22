@@ -20,7 +20,7 @@ Cambridge Dictionary's English–English entries are excellent, but its English�
 
 | Layer      | Choice                                                  |
 | ---------- | ------------------------------------------------------- |
-| Framework  | Next.js (App Router) · React · TypeScript (`strict`)    |
+| Framework  | Next.js 16 (App Router) · React · TypeScript (`strict`) |
 | Styling    | Tailwind CSS v4                                         |
 | Validation | Zod                                                     |
 | Data/Auth  | Supabase (PostgreSQL + Row Level Security)              |
@@ -30,15 +30,30 @@ Cambridge Dictionary's English–English entries are excellent, but its English�
 
 ## Getting Started
 
-**Prerequisites:** Node.js ≥ 22 (see `.nvmrc`), npm.
+**Prerequisites:** Node.js ≥ 22 (see `.nvmrc`), npm, and a free [Supabase](https://supabase.com/) project.
 
 ```bash
 git clone https://github.com/khoahaaoj/lexivault.git
 cd lexivault
 npm install
-cp .env.example .env.local   # then fill in your keys
+cp .env.example .env.local   # fill in Supabase URL, Publishable key, and ALLOWED_EMAILS
 npm run dev                  # http://localhost:3000
 ```
+
+### Database Migration (Supabase)
+
+Run [`supabase/migrations/001_init.sql`](./supabase/migrations/001_init.sql) once on your Supabase project:
+
+1. Open **Supabase Dashboard → SQL Editor → New query**.
+2. Paste the contents of `supabase/migrations/001_init.sql` and click **Run**.
+3. Confirm `entries` and `srs_cards` appear under **Table Editor** with RLS enabled.
+
+### Securing a Personal Public Deployment
+
+Because LexiVault calls your server-side Gemini API key, protect your quota with two layers:
+
+1. **Server allowlist (`ALLOWED_EMAILS`)** — set `ALLOWED_EMAILS=you@example.com` in `.env.local` and Vercel Environment Variables. Enforced across sign-up, sign-in, Next.js `proxy.ts`, `/auth/callback`, Server Components, and every `/api/*` route.
+2. **Disable public sign-ups** — after creating your account, go to **Supabase Dashboard → Authentication → Sign In / Providers → User Signups** and turn off **Allow new users to sign up**.
 
 ## Scripts
 
@@ -55,23 +70,28 @@ npm run dev                  # http://localhost:3000
 
 ## Environment Variables
 
-See [`.env.example`](./.env.example). Secrets (e.g. `GEMINI_API_KEY`) are **server-only** and validated with Zod at runtime; never prefix them with `NEXT_PUBLIC_`.
+See [`.env.example`](./.env.example). Secrets (`GEMINI_API_KEY`, `ALLOWED_EMAILS`) are **server-only** and validated with Zod at runtime; never prefix them with `NEXT_PUBLIC_`.
 
 ## Project Structure
 
 ```text
-app/                 # Next.js App Router (pages, layouts, route handlers)
-lib/                 # Framework-agnostic logic (env, SM-2, parsers, clients)
+app/                 # Next.js App Router (pages, layouts, actions, route handlers)
+  auth/callback/     # Email confirmation / PKCE callback route
+  login/             # Email + password sign-in & sign-up UI + Server Actions
+lib/
+  auth/              # Pure allowlist/redirect helpers, Zod schemas, server DAL
   env/               # Zod-validated env: schema (pure), public, server-only
+  supabase/          # Browser, Server, and Proxy Supabase SSR clients
+types/               # Typed Supabase Database schema definitions
+proxy.ts             # Next.js 16 session refresh & route/API guard
 supabase/migrations/ # SQL schema + RLS policies
-public/              # Static assets, PWA icons
 .github/workflows/   # CI pipeline
 ```
 
 ## Roadmap
 
 - [x] **Phase 1** — Scaffold, Git hygiene, CI
-- [ ] **Phase 2** — Supabase schema (RLS) & email/password auth
+- [x] **Phase 2** — Supabase schema (RLS), session proxy, allowlist & email/password auth
 - [ ] **Phase 3** — Hybrid dictionary engine (`POST /api/lookup`)
 - [ ] **Phase 4** — SM-2 engine, unit tests, flashcard review & Vault
 - [ ] **Phase 5** — PWA polish, architecture docs, deployment
