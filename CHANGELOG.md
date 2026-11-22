@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-22
+
+Phase 4 — SM-2 spaced repetition engine, unit tests, interactive Flashcard Review UI, and Vocabulary Vault.
+
+### Added
+
+- Pure TypeScript SM-2 engine (`lib/sm2.ts`) supporting `again (1)`, `hard (2)`, `good (3)`, `easy (4)` ratings, minimum `ease_factor >= 1.3`, input validation, `formatReviewInterval()`, `previewRatingIntervals()`, and `getMasteryStatus()`.
+- Comprehensive Vitest unit tests (`lib/sm2.test.ts`, `lib/srs/schemas.test.ts`) covering new cards, consecutive progressions, `Again` lapse resets, ease floor, invalid inputs, Zod request/query schemas, and Vault filtering.
+- Authenticated Route Handlers (`app/api/review/route.ts`, `app/api/vault/route.ts`, `app/api/vault/[entryId]/route.ts`) guarded by `requireApiUser()` and scoped to `user_id`.
+- Shared responsive navigation shell (`components/layout/app-shell.tsx`, `components/layout/nav-links.tsx`) with active `Lookup` (`/`), `Review` (`/review`), and `Vault` (`/vault`) links across desktop top navbar and mobile bottom bar.
+- Shared reusable dictionary detail UI (`components/dictionary/entry-details.tsx`) used across Lookup, Review, and Vault.
+- Interactive SM-2 Flip Card Review page (`app/review/page.tsx`, `components/review/review-workspace.tsx`) with progress bar, front-card audio + hidden meanings, `Space` to flip, `1–4` keyboard shortcuts, live interval previews, and session re-queueing for `Again`.
+- Vocabulary Vault page (`app/vault/page.tsx`, `components/vault/vault-workspace.tsx`) with summary counters, text search, CEFR (`A1–C2`) & mastery (`New`, `Learning`, `Mastered`) filters, accessible detail modal with SM-2 schedule stats, and 2-step delete confirmation.
+
+### Changed
+
+- Updated default Gemini model to `gemini-3.5-flash-lite` and surfaced HTTP `503`/`504` busy/timeout responses cleanly from `POST /api/lookup` (#4).
+
 ## [0.3.0] - 2026-11-22
 
 Phase 3 — Hybrid dictionary engine (`POST /api/lookup`), Free Dictionary grounding, Gemini structured output, and Lookup UI.
@@ -55,7 +73,8 @@ Phase 1 — project scaffold, Git hygiene and CI.
 - GitHub Actions CI running format check, lint, typecheck and test.
 - `.env.example` template, hardened `.gitignore`, README and MIT license.
 
-[Unreleased]: https://github.com/khoahaaoj/lexivault/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/khoahaaoj/lexivault/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/khoahaaoj/lexivault/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/khoahaaoj/lexivault/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/khoahaaoj/lexivault/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/khoahaaoj/lexivault/compare/v0.1.0...v0.2.0
