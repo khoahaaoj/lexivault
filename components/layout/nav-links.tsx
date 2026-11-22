@@ -107,7 +107,7 @@ export function NavLinks({ variant }: { variant: "desktop" | "mobile" }) {
   return (
     <nav
       aria-label="Mobile navigation"
-      className="fixed right-0 bottom-0 left-0 z-20 border-t border-border bg-surface/95 backdrop-blur sm:hidden"
+      className="fixed right-0 bottom-0 left-0 z-20 border-t border-border bg-surface/95 pb-[env(safe-area-inset-bottom)] backdrop-blur sm:hidden"
     >
       <div className="mx-auto grid max-w-md grid-cols-3 px-2 py-1.5">
         {NAV_ROUTES.map((item) => {
