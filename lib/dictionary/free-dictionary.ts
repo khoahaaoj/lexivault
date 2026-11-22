@@ -1,9 +1,16 @@
 import { z } from "zod";
 
+import type {
+  LookupPreviewData,
+  LookupPreviewMeaning,
+} from "@/lib/dictionary/stream";
+
 const FREE_DICTIONARY_API_BASE =
   "https://api.dictionaryapi.dev/api/v2/entries/en";
-const REQUEST_TIMEOUT_MS = 5000;
+const REQUEST_TIMEOUT_MS = 1800;
 const MAX_DEFINITIONS_PER_POS = 3;
+const MAX_PREVIEW_MEANINGS = 2;
+const MAX_PREVIEW_DEFINITIONS = 2;
 
 const UK_AUDIO_PATTERN = /(?:^|[-_/])(uk|gb)(?:[-_./]|$)/i;
 const US_AUDIO_PATTERN = /(?:^|[-_/])us(?:[-_./]|$)/i;
@@ -214,4 +221,82 @@ export async function fetchFreeDictionaryReference(
     console.warn(`Free Dictionary API lookup failed for "${term}":`, error);
     return EMPTY_RESULT;
   }
+}
+
+const condensedReferenceSchema = z.object({
+  word: z.string().optional(),
+  phonetics: z.array(z.string()).optional(),
+  meanings: z
+    .array(
+      z.object({
+        partOfSpeech: z.string(),
+        definitions: z.array(z.string()),
+      }),
+    )
+    .optional(),
+});
+
+export type { LookupPreviewData, LookupPreviewMeaning };
+
+/**
+ * Extracts a fast audio/IPA/English-definition preview card from Free
+ * Dictionary output so the user gets immediate feedback while Gemini streams.
+ */
+export function buildLookupPreview(
+  query: string,
+  result: FreeDictionaryResult,
+): LookupPreviewData | null {
+  let word = query;
+  let ipaTexts: string[] = [];
+  let meanings: LookupPreviewMeaning[] = [];
+
+  if (result.referenceJson) {
+    try {
+      const parsed = condensedReferenceSchema.safeParse(
+        JSON.parse(result.referenceJson),
+      );
+      if (parsed.success) {
+        if (parsed.data.word?.trim()) {
+          word = parsed.data.word.trim().toLowerCase();
+        }
+        if (parsed.data.phonetics) {
+          ipaTexts = parsed.data.phonetics
+            .map((text) => text.trim())
+            .filter((text) => text.length > 0);
+        }
+        if (parsed.data.meanings) {
+          meanings = parsed.data.meanings
+            .slice(0, MAX_PREVIEW_MEANINGS)
+            .map((meaning) => ({
+              part_of_speech: meaning.partOfSpeech,
+              definitions: meaning.definitions.slice(
+                0,
+                MAX_PREVIEW_DEFINITIONS,
+              ),
+            }))
+            .filter((meaning) => meaning.definitions.length > 0);
+        }
+      }
+    } catch {
+      // Malformed reference JSON should not prevent audio-only preview.
+    }
+  }
+
+  if (
+    !result.audioUkUrl &&
+    !result.audioUsUrl &&
+    ipaTexts.length === 0 &&
+    meanings.length === 0
+  ) {
+    return null;
+  }
+
+  return {
+    query,
+    word,
+    ipa_texts: ipaTexts,
+    audio_uk_url: result.audioUkUrl,
+    audio_us_url: result.audioUsUrl,
+    meanings,
+  };
 }
