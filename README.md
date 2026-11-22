@@ -76,17 +76,25 @@ See [`.env.example`](./.env.example). Secrets (`GEMINI_API_KEY`, `ALLOWED_EMAILS
 
 ```text
 app/                 # Next.js App Router (pages, layouts, actions, route handlers)
-  api/               # Authenticated Route Handlers (/api/lookup, /api/entries/save)
+  api/               # Authenticated Route Handlers (/api/lookup, /api/entries/save, /api/review, /api/vault)
   auth/callback/     # Email confirmation / PKCE callback route
   login/             # Email + password sign-in & sign-up UI + Server Actions
+  review/            # SM-2 spaced repetition flashcard review page
+  vault/             # Saved vocabulary search, filter, detail modal & delete page
 components/
+  dictionary/        # Shared CEFR badges, pronunciation buttons & bilingual entry sections
+  layout/            # Shared AppShell & responsive desktop/mobile navigation
   lookup/            # Cambridge-inspired dictionary workspace & entry cards
+  review/            # Flip-card SM-2 review session workspace
+  vault/             # Vault browser, filters, detail modal & delete confirmation
 lib/
   ai/                # Server-only Gemini prompts, schemas & structured enrichment
   audio/             # UK/US .mp3 pronunciation player + Web Speech API fallback
   auth/              # Pure allowlist/redirect helpers, Zod schemas, server DAL
   dictionary/        # Input validation, Free Dictionary parser/fetcher, mappers
   env/               # Zod-validated env: schema (pure), public, server-only
+  sm2.ts             # Pure TypeScript SM-2 spaced repetition algorithm & interval preview
+  srs/               # Review & Vault Zod schemas and relation/filter mappers
   supabase/          # Browser, Server, and Proxy Supabase SSR clients
 types/               # Typed Supabase Database schema definitions
 proxy.ts             # Next.js 16 session refresh & route/API guard
@@ -99,7 +107,7 @@ supabase/migrations/ # SQL schema + RLS policies
 - [x] **Phase 1** — Scaffold, Git hygiene, CI
 - [x] **Phase 2** — Supabase schema (RLS), session proxy, allowlist & email/password auth
 - [x] **Phase 3** — Hybrid dictionary engine (`POST /api/lookup`, save to flashcards, audio fallback)
-- [ ] **Phase 4** — SM-2 engine, unit tests, flashcard review & Vault
+- [x] **Phase 4** — SM-2 engine, unit tests, flashcard review & Vault
 - [ ] **Phase 5** — PWA polish, architecture docs, deployment
 
 ## License
