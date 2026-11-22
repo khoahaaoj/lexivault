@@ -76,10 +76,16 @@ See [`.env.example`](./.env.example). Secrets (`GEMINI_API_KEY`, `ALLOWED_EMAILS
 
 ```text
 app/                 # Next.js App Router (pages, layouts, actions, route handlers)
+  api/               # Authenticated Route Handlers (/api/lookup, /api/entries/save)
   auth/callback/     # Email confirmation / PKCE callback route
   login/             # Email + password sign-in & sign-up UI + Server Actions
+components/
+  lookup/            # Cambridge-inspired dictionary workspace & entry cards
 lib/
+  ai/                # Server-only Gemini prompts, schemas & structured enrichment
+  audio/             # UK/US .mp3 pronunciation player + Web Speech API fallback
   auth/              # Pure allowlist/redirect helpers, Zod schemas, server DAL
+  dictionary/        # Input validation, Free Dictionary parser/fetcher, mappers
   env/               # Zod-validated env: schema (pure), public, server-only
   supabase/          # Browser, Server, and Proxy Supabase SSR clients
 types/               # Typed Supabase Database schema definitions
@@ -92,7 +98,7 @@ supabase/migrations/ # SQL schema + RLS policies
 
 - [x] **Phase 1** — Scaffold, Git hygiene, CI
 - [x] **Phase 2** — Supabase schema (RLS), session proxy, allowlist & email/password auth
-- [ ] **Phase 3** — Hybrid dictionary engine (`POST /api/lookup`)
+- [x] **Phase 3** — Hybrid dictionary engine (`POST /api/lookup`, save to flashcards, audio fallback)
 - [ ] **Phase 4** — SM-2 engine, unit tests, flashcard review & Vault
 - [ ] **Phase 5** — PWA polish, architecture docs, deployment
 
