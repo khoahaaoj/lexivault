@@ -16,6 +16,35 @@ export const publicEnvSchema = z.object({
   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: z.string().min(1),
 });
 
+/**
+ * Optional server-only email allowlist (`ALLOWED_EMAILS=a@x.com,b@y.com`).
+ *
+ * - Unset or blank -> `null` (unrestricted; convenient for local development).
+ * - Non-empty -> validated, deduplicated lowercase email list.
+ * - Malformed entries (e.g. typos or bare commas) throw loudly instead of
+ *   silently opening access.
+ */
+const allowedEmailsSchema = z
+  .string()
+  .trim()
+  .optional()
+  .transform((value) => {
+    if (!value) {
+      return null;
+    }
+    const items = value
+      .split(",")
+      .map((item) => item.trim().toLowerCase())
+      .filter((item) => item.length > 0);
+    return Array.from(new Set(items));
+  })
+  .pipe(z.array(z.email()).min(1).nullable());
+
+/** Server-only access control variables (independent of Gemini config). */
+export const authEnvSchema = z.object({
+  ALLOWED_EMAILS: allowedEmailsSchema,
+});
+
 /** Secrets that must never reach the client bundle. */
 export const serverEnvSchema = z.object({
   GEMINI_API_KEY: z.string().min(1),
@@ -28,6 +57,7 @@ export const serverEnvSchema = z.object({
 });
 
 export type PublicEnv = z.infer<typeof publicEnvSchema>;
+export type AuthEnv = z.infer<typeof authEnvSchema>;
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
 
 type RawEnv = Record<string, string | undefined>;
@@ -58,6 +88,10 @@ function parseOrThrow<T extends z.ZodType>(
 
 export function parsePublicEnv(source: RawEnv): PublicEnv {
   return parseOrThrow(publicEnvSchema, source, "public");
+}
+
+export function parseAuthEnv(source: RawEnv): AuthEnv {
+  return parseOrThrow(authEnvSchema, source, "auth");
 }
 
 export function parseServerEnv(source: RawEnv): ServerEnv {
