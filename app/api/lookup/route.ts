@@ -14,23 +14,45 @@ import {
 } from "@/lib/dictionary/validation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
-function isRateLimitError(error: unknown): boolean {
+function getErrorDetails(error: unknown): {
+  status: number | null;
+  message: string;
+} {
   if (!error || typeof error !== "object") {
-    return false;
+    return { status: null, message: "" };
   }
-  const maybeStatus =
-    "status" in error && typeof error.status === "number" ? error.status : null;
-  if (maybeStatus === 429) {
-    return true;
-  }
-  const message =
-    "message" in error && typeof error.message === "string"
-      ? error.message
-      : "";
+  return {
+    status:
+      "status" in error && typeof error.status === "number"
+        ? error.status
+        : null,
+    message:
+      "message" in error && typeof error.message === "string"
+        ? error.message
+        : "",
+  };
+}
+
+function isRateLimitError(error: unknown): boolean {
+  const { status, message } = getErrorDetails(error);
   return (
+    status === 429 ||
     message.includes("429") ||
     message.includes("RESOURCE_EXHAUSTED") ||
     message.toLowerCase().includes("quota")
+  );
+}
+
+function isServiceUnavailableError(error: unknown): boolean {
+  const { status, message } = getErrorDetails(error);
+  return (
+    status === 503 ||
+    status === 504 ||
+    message.includes("503") ||
+    message.includes("504") ||
+    message.includes("UNAVAILABLE") ||
+    message.includes("DEADLINE_EXCEEDED") ||
+    message.toLowerCase().includes("high demand")
   );
 }
 
@@ -152,6 +174,16 @@ export async function POST(request: Request) {
             "AI lookup quota is temporarily busy. Please wait a moment and try again.",
         },
         { status: 429 },
+      );
+    }
+
+    if (isServiceUnavailableError(error)) {
+      return NextResponse.json(
+        {
+          error:
+            "Gemini model is temporarily busy or timed out. Please retry in a few seconds.",
+        },
+        { status: 503 },
       );
     }
 

@@ -150,7 +150,7 @@ describe("enrichWordWithGemini", () => {
     vi.clearAllMocks();
     mockGetServerEnv.mockReturnValue({
       GEMINI_API_KEY: "test-gemini-key",
-      GEMINI_MODEL: "gemini-2.5-flash",
+      GEMINI_MODEL: "gemini-3.5-flash-lite",
     });
   });
 
@@ -174,7 +174,7 @@ describe("enrichWordWithGemini", () => {
       apiKey: "test-gemini-key",
     });
     expect(mockGenerateContent).toHaveBeenCalledWith({
-      model: "gemini-2.5-flash",
+      model: "gemini-3.5-flash-lite",
       contents: buildDictionaryUserPrompt("mitigate", '{"word":"mitigate"}'),
       config: {
         systemInstruction: DICTIONARY_SYSTEM_PROMPT,
