@@ -158,4 +158,14 @@ describe("parsePartialDictionaryResponse", () => {
     expect(parsed?.entries[0]?.word).toBe("lucid");
     expect(parsed?.entries[0]?.definition_en).toBe("clear and");
   });
+
+  it("numbers streaming entries that share the same part of speech", () => {
+    const raw =
+      '{"is_valid":true,"entries":[{"word":"pick up","part_of_speech":"phrasal verb","definition_en":"to lift something"},{"word":"pick up","part_of_speech":"phrasal verb","definition_en":"to collect someone in a vehicle"}]}';
+    const parsed = parsePartialDictionaryResponse(raw);
+    expect(parsed?.entries.map((e) => e.part_of_speech)).toEqual([
+      "phrasal verb (1)",
+      "phrasal verb (2)",
+    ]);
+  });
 });

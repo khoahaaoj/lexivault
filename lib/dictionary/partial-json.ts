@@ -1,3 +1,4 @@
+import { disambiguateSamePosSenses } from "@/lib/dictionary/mappers";
 import type { PartialLookupEntry } from "@/lib/dictionary/stream";
 import type { CefrLevel } from "@/types/database";
 
@@ -417,6 +418,6 @@ export function parsePartialDictionaryResponse(
     ...(typeof root.suggestion === "string" || root.suggestion === null
       ? { suggestion: root.suggestion }
       : {}),
-    entries,
+    entries: disambiguateSamePosSenses(entries),
   };
 }

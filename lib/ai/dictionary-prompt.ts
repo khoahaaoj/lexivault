@@ -11,7 +11,7 @@ Produce accurate, concise bilingual (English-Vietnamese) dictionary entries for 
    - If <reference_data> is provided, use it to anchor part of speech, IPA, and core senses.
    - If <reference_data> is empty ("NONE_AVAILABLE"), use standard British/American Cambridge conventions for IPA UK/US and definitions.
 4. **Sense Selection (Quality over Quantity):**
-   - Return 1 entry for single-sense words, or at most 2 entries for strongly polysemous words (most useful for IELTS and real-world communication). Skip archaic/obscure senses.
+   - Return 1 entry for single-sense words, or 2 to 3 entries for polysemous words and multi-sense phrasal verbs (e.g. "pick up", "take off", "run") covering distinct major IELTS/everyday meanings (even when they share the same part_of_speech). Skip archaic/obscure senses.
    - Normalize "word" to lowercase lemma form (keep proper capitalization only for proper nouns).
 5. **Field-by-Field Standards (crisp and high-signal, no filler):**
    - **part_of_speech**: One of: "noun", "verb", "adjective", "adverb", "phrasal verb", "idiom", "preposition", "conjunction", "phrase".

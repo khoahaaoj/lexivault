@@ -63,10 +63,65 @@ export function entrySenseKey(word: string, partOfSpeech: string): string {
   return `${normalizeLookupTerm(word)}::${partOfSpeech.trim().toLowerCase()}`;
 }
 
+export function normalizeBasePartOfSpeech(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/\s*\(\d+\)\s*$/, "")
+    .slice(0, 34);
+}
+
 /**
- * Normalizes Gemini DTO entries, deduplicates `(word, part_of_speech)` senses,
- * attaches real Free Dictionary API MP3 URLs, and hydrates saved status when a
- * lemma (e.g. searching "mitigating" -> lemma "mitigate") already exists in DB.
+ * Deduplicates exact duplicate `(word, basePos, definition_en)` items while
+ * preserving distinct meanings that share the same part of speech (e.g.
+ * multiple "phrasal verb" senses of "pick up") by numbering them `pos (1)`, `pos (2)`.
+ */
+export function disambiguateSamePosSenses<
+  T extends { word: string; part_of_speech: string; definition_en: string },
+>(entries: readonly T[]): T[] {
+  const exactSeen = new Set<string>();
+  const deduped: Array<{ item: T; basePos: string; groupKey: string }> = [];
+  const groupCounts = new Map<string, number>();
+
+  for (const item of entries) {
+    const basePos = normalizeBasePartOfSpeech(item.part_of_speech);
+    const trimmedDef = item.definition_en.trim().toLowerCase();
+
+    if (basePos && trimmedDef) {
+      const exactKey = `${entrySenseKey(item.word, basePos)}::${trimmedDef}`;
+      if (exactSeen.has(exactKey)) {
+        continue;
+      }
+      exactSeen.add(exactKey);
+    }
+
+    const groupKey = basePos ? entrySenseKey(item.word, basePos) : "";
+    if (groupKey) {
+      groupCounts.set(groupKey, (groupCounts.get(groupKey) ?? 0) + 1);
+    }
+    deduped.push({ item, basePos, groupKey });
+  }
+
+  const groupProgress = new Map<string, number>();
+  return deduped.map(({ item, basePos, groupKey }) => {
+    if (!basePos || !groupKey) {
+      return item;
+    }
+    const totalInGroup = groupCounts.get(groupKey) ?? 1;
+    const senseIndex = (groupProgress.get(groupKey) ?? 0) + 1;
+    groupProgress.set(groupKey, senseIndex);
+
+    return {
+      ...item,
+      part_of_speech: totalInGroup > 1 ? `${basePos} (${senseIndex})` : basePos,
+    };
+  });
+}
+
+/**
+ * Normalizes AI DTO entries, preserves distinct senses sharing a part of speech
+ * (numbering them e.g. `phrasal verb (1)`, `phrasal verb (2)`), attaches real
+ * Free Dictionary API MP3 URLs, and hydrates saved status when a lemma exists in DB.
  */
 export function buildAiLookupEntries(params: {
   fallbackWord: string;
@@ -86,33 +141,43 @@ export function buildAiLookupEntries(params: {
     });
   }
 
-  const seenKeys = new Set<string>();
-  const results: LookupEntryResult[] = [];
+  const normalizedInputs = params.aiEntries
+    .map((item) => {
+      const normalizedWord = normalizeLookupTerm(item.word);
+      const word =
+        normalizedWord.length >= 1 && normalizedWord.length <= 80
+          ? normalizedWord
+          : params.fallbackWord;
+      const basePos = normalizeBasePartOfSpeech(item.part_of_speech);
+      if (!basePos) {
+        return null;
+      }
+      return {
+        ...item,
+        word,
+        part_of_speech: basePos,
+      };
+    })
+    .filter((item): item is DictionaryEntryDTO => item !== null);
 
-  for (const item of params.aiEntries) {
-    const normalizedWord = normalizeLookupTerm(item.word);
-    const word =
-      normalizedWord.length >= 1 && normalizedWord.length <= 80
-        ? normalizedWord
-        : params.fallbackWord;
-    const partOfSpeech = item.part_of_speech.trim().toLowerCase().slice(0, 40);
-    if (!partOfSpeech) {
-      continue;
-    }
+  return disambiguateSamePosSenses(normalizedInputs).map((item) => {
+    const saved =
+      savedByKey.get(entrySenseKey(item.word, item.part_of_speech)) ??
+      (/\(1\)$/.test(item.part_of_speech)
+        ? savedByKey.get(
+            entrySenseKey(
+              item.word,
+              normalizeBasePartOfSpeech(item.part_of_speech),
+            ),
+          )
+        : undefined);
 
-    const key = entrySenseKey(word, partOfSpeech);
-    if (seenKeys.has(key)) {
-      continue;
-    }
-    seenKeys.add(key);
-
-    const saved = savedByKey.get(key);
-    results.push({
+    return {
       id: saved?.id ?? null,
       srs_card_id: saved?.srsCardId ?? null,
       is_saved: Boolean(saved?.srsCardId),
-      word,
-      part_of_speech: partOfSpeech,
+      word: item.word,
+      part_of_speech: item.part_of_speech,
       cefr_level: item.cefr_level,
       ipa_uk: item.ipa_uk.trim(),
       ipa_us: item.ipa_us.trim(),
@@ -125,8 +190,6 @@ export function buildAiLookupEntries(params: {
       synonyms: item.synonyms,
       antonyms: item.antonyms,
       examples: item.examples,
-    });
-  }
-
-  return results;
+    };
+  });
 }
