@@ -83,11 +83,23 @@ function markValueCompleted(stack: ContainerFrame[], endPos: number): void {
 }
 
 /**
+ * Strips optional opening/closing Markdown code fences (` ```json ... ``` `)
+ * so JSON parsing works cleanly even when an LLM wraps output in a fence.
+ */
+export function stripMarkdownCodeFence(raw: string): string {
+  return raw
+    .trimStart()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "");
+}
+
+/**
  * Repairs an incomplete JSON object/array prefix (typically received mid-stream
  * from structured LLM output) into parseable JSON, returning `null` if the
  * prefix has not started a JSON container or is structurally invalid.
  */
-export function repairPartialJson(raw: string): string | null {
+export function repairPartialJson(rawInput: string): string | null {
+  const raw = stripMarkdownCodeFence(rawInput);
   let start = 0;
   while (start < raw.length && isWhitespace(raw[start])) {
     start += 1;

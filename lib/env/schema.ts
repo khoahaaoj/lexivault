@@ -8,6 +8,7 @@ import { z } from "zod";
  * `./public.ts` (browser-safe) and `./server.ts` (server-only).
  */
 
+export const DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b";
 export const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite";
 
 /** Safe to expose to the browser (inlined at build time by Next.js). */
@@ -46,15 +47,27 @@ export const authEnvSchema = z.object({
 });
 
 /** Secrets that must never reach the client bundle. */
-export const serverEnvSchema = z.object({
-  GEMINI_API_KEY: z.string().min(1),
-  GEMINI_MODEL: z
-    .string()
-    .trim()
-    .min(1)
-    .optional()
-    .transform((value) => value ?? DEFAULT_GEMINI_MODEL),
-});
+export const serverEnvSchema = z
+  .object({
+    GROQ_API_KEY: z.string().trim().min(1).optional(),
+    GROQ_MODEL: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .transform((value) => value ?? DEFAULT_GROQ_MODEL),
+    GEMINI_API_KEY: z.string().trim().min(1).optional(),
+    GEMINI_MODEL: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .transform((value) => value ?? DEFAULT_GEMINI_MODEL),
+  })
+  .refine((env) => Boolean(env.GROQ_API_KEY || env.GEMINI_API_KEY), {
+    message:
+      "At least one AI provider key (GROQ_API_KEY or GEMINI_API_KEY) must be configured.",
+  });
 
 export type PublicEnv = z.infer<typeof publicEnvSchema>;
 export type AuthEnv = z.infer<typeof authEnvSchema>;

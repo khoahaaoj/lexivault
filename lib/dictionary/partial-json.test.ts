@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   parsePartialDictionaryResponse,
   repairPartialJson,
+  stripMarkdownCodeFence,
 } from "@/lib/dictionary/partial-json";
 
 describe("repairPartialJson", () => {
@@ -147,5 +148,14 @@ describe("parsePartialDictionaryResponse", () => {
       suggestion: "mitigate",
       entries: [],
     });
+  });
+
+  it("strips markdown code fences before repairing or parsing partial JSON", () => {
+    expect(stripMarkdownCodeFence('```json\n{"a":1}\n```')).toBe('{"a":1}');
+    const parsed = parsePartialDictionaryResponse(
+      '```json\n{"is_valid":true,"entries":[{"word":"lucid","definition_en":"clear and',
+    );
+    expect(parsed?.entries[0]?.word).toBe("lucid");
+    expect(parsed?.entries[0]?.definition_en).toBe("clear and");
   });
 });

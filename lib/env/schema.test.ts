@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_GEMINI_MODEL,
+  DEFAULT_GROQ_MODEL,
   parseAuthEnv,
   parsePublicEnv,
   parseServerEnv,
@@ -66,29 +67,54 @@ describe("parseAuthEnv", () => {
 });
 
 describe("parseServerEnv", () => {
-  it(`defaults GEMINI_MODEL to ${DEFAULT_GEMINI_MODEL}`, () => {
-    expect(parseServerEnv({ GEMINI_API_KEY: "key" })).toEqual({
-      GEMINI_API_KEY: "key",
+  it(`defaults GEMINI_MODEL to ${DEFAULT_GEMINI_MODEL} and GROQ_MODEL to ${DEFAULT_GROQ_MODEL}`, () => {
+    expect(parseServerEnv({ GEMINI_API_KEY: "gemini-key" })).toEqual({
+      GROQ_API_KEY: undefined,
+      GROQ_MODEL: DEFAULT_GROQ_MODEL,
+      GEMINI_API_KEY: "gemini-key",
       GEMINI_MODEL: DEFAULT_GEMINI_MODEL,
     });
   });
 
-  it("falls back to the default model when GEMINI_MODEL is empty", () => {
-    expect(
-      parseServerEnv({ GEMINI_API_KEY: "key", GEMINI_MODEL: "" }).GEMINI_MODEL,
-    ).toBe(DEFAULT_GEMINI_MODEL);
+  it("accepts a Groq-only configuration", () => {
+    expect(parseServerEnv({ GROQ_API_KEY: "gsk_test" })).toEqual({
+      GROQ_API_KEY: "gsk_test",
+      GROQ_MODEL: DEFAULT_GROQ_MODEL,
+      GEMINI_API_KEY: undefined,
+      GEMINI_MODEL: DEFAULT_GEMINI_MODEL,
+    });
   });
 
-  it("respects an explicit GEMINI_MODEL", () => {
+  it("accepts both providers configured with custom models", () => {
     expect(
-      parseServerEnv({ GEMINI_API_KEY: "key", GEMINI_MODEL: "gemini-2.5-pro" })
-        .GEMINI_MODEL,
-    ).toBe("gemini-2.5-pro");
+      parseServerEnv({
+        GROQ_API_KEY: "gsk_test",
+        GROQ_MODEL: "openai/gpt-oss-20b",
+        GEMINI_API_KEY: "gemini-key",
+        GEMINI_MODEL: "gemini-3.8-flash",
+      }),
+    ).toEqual({
+      GROQ_API_KEY: "gsk_test",
+      GROQ_MODEL: "openai/gpt-oss-20b",
+      GEMINI_API_KEY: "gemini-key",
+      GEMINI_MODEL: "gemini-3.8-flash",
+    });
   });
 
-  it("throws a readable error when GEMINI_API_KEY is missing", () => {
+  it("falls back to default models when model env vars are empty", () => {
+    const parsed = parseServerEnv({
+      GROQ_API_KEY: "gsk_test",
+      GROQ_MODEL: "",
+      GEMINI_API_KEY: "gemini-key",
+      GEMINI_MODEL: "",
+    });
+    expect(parsed.GROQ_MODEL).toBe(DEFAULT_GROQ_MODEL);
+    expect(parsed.GEMINI_MODEL).toBe(DEFAULT_GEMINI_MODEL);
+  });
+
+  it("throws a readable error when neither GROQ_API_KEY nor GEMINI_API_KEY is set", () => {
     expect(() => parseServerEnv({})).toThrow(
-      /Invalid server environment variables[\s\S]*GEMINI_API_KEY/,
+      /Invalid server environment variables[\s\S]*GROQ_API_KEY or GEMINI_API_KEY/,
     );
   });
 });

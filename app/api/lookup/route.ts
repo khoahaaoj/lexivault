@@ -13,7 +13,13 @@ import {
   type FreeDictionaryResult,
 } from "@/lib/dictionary/free-dictionary";
 import {
+  readGlobalDictionaryCache,
+  writeGlobalDictionaryCache,
+} from "@/lib/dictionary/global-cache";
+import {
   buildAiLookupEntries,
+  entrySenseKey,
+  extractSrsCardId,
   mapCachedEntryToResult,
 } from "@/lib/dictionary/mappers";
 import { parsePartialDictionaryResponse } from "@/lib/dictionary/partial-json";
@@ -22,6 +28,7 @@ import {
   lookupRequestSchema,
   normalizeLookupTerm,
   type LookupApiResponse,
+  type LookupEntryResult,
 } from "@/lib/dictionary/validation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -110,10 +117,10 @@ async function hydrateLemmaSavedRows(
   supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
   userId: string,
   term: string,
-  aiEntries: DictionaryResponseDTO["entries"],
+  aiEntries: ReadonlyArray<{ word: string }>,
 ) {
-  // Cache miss already proved there are no saved rows for `word === term`.
-  // Only query Supabase if Gemini normalized an inflected query to another lemma.
+  // Cache miss in personal `entries` already proved there are no saved rows for `word === term`.
+  // Only query Supabase if the model normalized an inflected query to another lemma.
   const lemmaWordsToQuery = Array.from(
     new Set(
       aiEntries
@@ -138,6 +145,20 @@ async function hydrateLemmaSavedRows(
     .in("word", lemmaWordsToQuery);
 
   return existingLemmaRows ?? [];
+}
+
+function respondWithCacheHit(
+  cachePayload: LookupApiResponse,
+  wantsStream: boolean,
+): Response {
+  if (wantsStream) {
+    const event: LookupStreamEvent = { type: "cache", data: cachePayload };
+    return new Response(`${JSON.stringify(event)}\n`, {
+      headers: NDJSON_HEADERS,
+    });
+  }
+
+  return NextResponse.json(cachePayload);
 }
 
 async function finalizeLookupResponse(params: {
@@ -214,13 +235,17 @@ export async function POST(request: Request) {
     request.headers.get("accept")?.includes("application/x-ndjson") ?? false;
   const supabase = await createSupabaseServerClient();
 
-  // 1. Cache-first lookup in the authenticated user's entries table.
-  const { data: cachedRows, error: cacheError } = await supabase
-    .from("entries")
-    .select("*, srs_cards(id)")
-    .eq("user_id", auth.user.id)
-    .eq("word", term)
-    .order("created_at", { ascending: true });
+  // 1. Concurrent cache-first lookup: personal `entries` + global L2 cache.
+  const [{ data: cachedRows, error: cacheError }, globalCachedSenses] =
+    await Promise.all([
+      supabase
+        .from("entries")
+        .select("*, srs_cards(id)")
+        .eq("user_id", auth.user.id)
+        .eq("word", term)
+        .order("created_at", { ascending: true }),
+      readGlobalDictionaryCache(supabase, term),
+    ]);
 
   if (cacheError) {
     console.error("Failed to query cached dictionary entries:", cacheError);
@@ -231,25 +256,57 @@ export async function POST(request: Request) {
   }
 
   if (cachedRows && cachedRows.length > 0) {
-    const cachePayload: LookupApiResponse = {
-      source: "cache",
-      query: term,
-      is_valid: true,
-      suggestion: null,
-      entries: cachedRows.map(mapCachedEntryToResult),
-    };
-
-    if (wantsStream) {
-      const event: LookupStreamEvent = { type: "cache", data: cachePayload };
-      return new Response(`${JSON.stringify(event)}\n`, {
-        headers: NDJSON_HEADERS,
-      });
-    }
-
-    return NextResponse.json(cachePayload);
+    return respondWithCacheHit(
+      {
+        source: "cache",
+        query: term,
+        is_valid: true,
+        suggestion: null,
+        entries: cachedRows.map(mapCachedEntryToResult),
+      },
+      wantsStream,
+    );
   }
 
-  // 2a. Non-streaming JSON mode (backwards-compatible): run Free Dictionary + Gemini in parallel.
+  if (globalCachedSenses && globalCachedSenses.length > 0) {
+    const existingLemmaRows = await hydrateLemmaSavedRows(
+      supabase,
+      auth.user.id,
+      term,
+      globalCachedSenses,
+    );
+    const savedByKey = new Map(
+      existingLemmaRows.map((row) => [
+        entrySenseKey(row.word, row.part_of_speech),
+        { id: row.id, srsCardId: extractSrsCardId(row.srs_cards) },
+      ]),
+    );
+
+    const entries: LookupEntryResult[] = globalCachedSenses.map((sense) => {
+      const saved = savedByKey.get(
+        entrySenseKey(sense.word, sense.part_of_speech),
+      );
+      return {
+        ...sense,
+        id: saved?.id ?? null,
+        srs_card_id: saved?.srsCardId ?? null,
+        is_saved: Boolean(saved?.srsCardId),
+      };
+    });
+
+    return respondWithCacheHit(
+      {
+        source: "cache",
+        query: term,
+        is_valid: true,
+        suggestion: null,
+        entries,
+      },
+      wantsStream,
+    );
+  }
+
+  // 2a. Non-streaming JSON mode (backwards-compatible): run Free Dictionary + AI in parallel.
   if (!wantsStream) {
     try {
       const [freeDict, gemini] = await Promise.all([
@@ -264,6 +321,15 @@ export async function POST(request: Request) {
         freeDict,
         gemini,
       });
+
+      if (responsePayload.is_valid && responsePayload.entries.length > 0) {
+        await writeGlobalDictionaryCache(
+          supabase,
+          term,
+          responsePayload.entries,
+        );
+      }
+
       return NextResponse.json(responsePayload);
     } catch (error) {
       const mapped = classifyLookupError(error);
@@ -369,6 +435,14 @@ export async function POST(request: Request) {
           gemini,
         });
         send({ type: "final", data: responsePayload });
+
+        if (responsePayload.is_valid && responsePayload.entries.length > 0) {
+          await writeGlobalDictionaryCache(
+            supabase,
+            term,
+            responsePayload.entries,
+          );
+        }
       } catch (error) {
         finished = true;
         if (!request.signal.aborted) {
