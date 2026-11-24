@@ -83,12 +83,14 @@ describe("session-cache (L1 persistent localStorage LRU)", () => {
     vi.useRealTimers();
   });
 
-  it("normalizes lookup keys and persists to localStorage", () => {
+  it("normalizes lookup keys, clears legacy v1/v2 keys, and persists to v3 localStorage", () => {
+    localStorageMock.setItem("lexivault:lookup-cache:v2", '[["old",{}]]');
     const payload = makeLookupResponse("mitigate");
     setCachedLookup("  MITIGATE  ", payload);
 
+    expect(localStorageMock.getItem("lexivault:lookup-cache:v2")).toBeNull();
     expect(
-      localStorageMock.getItem("lexivault:lookup-cache:v2"),
+      localStorageMock.getItem("lexivault:lookup-cache:v3"),
     ).not.toBeNull();
     expect(getCachedLookup("mitigate")).toEqual(payload);
     expect(getCachedLookup("  MiTiGaTe ")).toEqual(payload);

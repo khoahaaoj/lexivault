@@ -94,4 +94,77 @@ describe("buildAiLookupEntries", () => {
       audio_us_url: "https://cdn.example.com/mitigate-us.mp3",
     });
   });
+
+  it("preserves and numbers distinct senses sharing the same part of speech (e.g. pick up)", () => {
+    const pickUpEntries = [
+      {
+        ...BASE_AI_ENTRY,
+        word: "pick up",
+        part_of_speech: "phrasal verb",
+        definition_en: "to lift something up from a surface",
+        explanation_vi: "Nhặt hoặc nhấc cái gì đó lên.",
+      },
+      {
+        ...BASE_AI_ENTRY,
+        word: "pick up",
+        part_of_speech: "phrasal verb",
+        definition_en: "to collect someone in a vehicle",
+        explanation_vi: "Đón ai đó bằng xe.",
+      },
+      {
+        ...BASE_AI_ENTRY,
+        word: "pick up",
+        part_of_speech: "phrasal verb",
+        definition_en: "to learn a new skill or language informally",
+        explanation_vi: "Học lỏm hoặc tiếp thu nhanh một kỹ năng.",
+      },
+      {
+        ...BASE_AI_ENTRY,
+        word: "run",
+        part_of_speech: "verb",
+        definition_en: "to move swiftly on foot",
+        explanation_vi: "Chạy bằng chân.",
+      },
+      {
+        ...BASE_AI_ENTRY,
+        word: "run",
+        part_of_speech: "noun",
+        definition_en: "an act of running",
+        explanation_vi: "Một lượt chạy bộ.",
+      },
+    ];
+
+    const results = buildAiLookupEntries({
+      fallbackWord: "pick up",
+      aiEntries: pickUpEntries,
+      audioUkUrl: null,
+      audioUsUrl: null,
+      savedRows: [
+        {
+          id: "entry-old",
+          word: "pick up",
+          part_of_speech: "phrasal verb",
+          srs_cards: { id: "card-old" },
+        },
+        {
+          id: "entry-2",
+          word: "pick up",
+          part_of_speech: "phrasal verb (2)",
+          srs_cards: { id: "card-2" },
+        },
+      ],
+    });
+
+    expect(results).toHaveLength(5);
+    expect(results.map((item) => [item.word, item.part_of_speech])).toEqual([
+      ["pick up", "phrasal verb (1)"],
+      ["pick up", "phrasal verb (2)"],
+      ["pick up", "phrasal verb (3)"],
+      ["run", "verb"],
+      ["run", "noun"],
+    ]);
+    expect(results[0]?.is_saved).toBe(true);
+    expect(results[1]?.is_saved).toBe(true);
+    expect(results[2]?.is_saved).toBe(false);
+  });
 });

@@ -3,7 +3,11 @@ import {
   type LookupApiResponse,
 } from "@/lib/dictionary/validation";
 
-const STORAGE_KEY = "lexivault:lookup-cache:v2";
+const STORAGE_KEY = "lexivault:lookup-cache:v3";
+const LEGACY_STORAGE_KEYS = [
+  "lexivault:lookup-cache:v1",
+  "lexivault:lookup-cache:v2",
+] as const;
 const MAX_CACHE_ENTRIES = 200;
 export const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -52,6 +56,9 @@ function hydrateStore(): void {
   }
 
   try {
+    for (const legacyKey of LEGACY_STORAGE_KEYS) {
+      storage.removeItem(legacyKey);
+    }
     const raw = storage.getItem(STORAGE_KEY);
     if (!raw) {
       return;
@@ -213,6 +220,9 @@ export function clearLookupSessionCache(): void {
   }
   try {
     storage.removeItem(STORAGE_KEY);
+    for (const legacyKey of LEGACY_STORAGE_KEYS) {
+      storage.removeItem(legacyKey);
+    }
   } catch {
     // Ignore restricted storage errors.
   }
