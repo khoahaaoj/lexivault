@@ -8,6 +8,12 @@ import {
 } from "@google/genai";
 import { z } from "zod";
 
+import {
+  GROQ_FALLBACK_MODEL,
+  GroqApiError,
+  enrichWithGroq,
+  streamWithGroq,
+} from "@/lib/ai/groq-provider";
 import { getServerEnv } from "@/lib/env/server";
 import {
   DICTIONARY_SYSTEM_PROMPT,
@@ -16,6 +22,9 @@ import {
 
 export const FALLBACK_GEMINI_MODEL = "gemini-3.1-flash-lite";
 
+const GROQ_WITH_GEMINI_FAILOVER_TIMEOUT_MS = 8_000;
+const GROQ_PRIMARY_ONLY_TIMEOUT_MS = 12_000;
+const GROQ_FALLBACK_ONLY_TIMEOUT_MS = 15_000;
 const PRIMARY_WITH_FALLBACK_TIMEOUT_MS = 12_000;
 const STANDALONE_TIMEOUT_MS = 18_000;
 const GEMINI_3_FLASH_LITE_PATTERN = /^gemini-3(?:\.\d+)?-flash-lite(?:$|-)/i;
@@ -269,6 +278,100 @@ async function executeWithFallback<T>(
   }
 }
 
+function isTransientGroqError(error: unknown): boolean {
+  if (error instanceof GroqApiError) {
+    return error.status === 429 || error.status >= 500;
+  }
+  return isTransientGeminiError(error);
+}
+
+async function routeWithFailover<T>(params: {
+  callerSignal?: AbortSignal;
+  onReset?: () => void;
+  runGroq: (
+    apiKey: string,
+    model: string,
+    abortSignal: AbortSignal,
+  ) => Promise<T>;
+  runGemini: (
+    apiKey: string,
+    model: string,
+    abortSignal: AbortSignal,
+  ) => Promise<T>;
+}): Promise<T> {
+  const { GROQ_API_KEY, GROQ_MODEL, GEMINI_API_KEY, GEMINI_MODEL } =
+    getServerEnv();
+
+  const attemptGemini = () => {
+    if (!GEMINI_API_KEY) {
+      throw new Error("No Gemini API key configured.");
+    }
+    return executeWithFallback(
+      GEMINI_MODEL,
+      params.callerSignal,
+      (model, abortSignal) =>
+        params.runGemini(GEMINI_API_KEY, model, abortSignal),
+      params.onReset,
+    );
+  };
+
+  if (GROQ_API_KEY && GEMINI_API_KEY) {
+    try {
+      return await params.runGroq(
+        GROQ_API_KEY,
+        GROQ_MODEL,
+        createAttemptSignal(
+          GROQ_WITH_GEMINI_FAILOVER_TIMEOUT_MS,
+          params.callerSignal,
+        ),
+      );
+    } catch (error) {
+      if (params.callerSignal?.aborted) {
+        throw error;
+      }
+      console.warn(
+        "Groq primary failed, failing over to Gemini:",
+        error instanceof Error ? error.message : error,
+      );
+      params.onReset?.();
+      return attemptGemini();
+    }
+  }
+
+  if (GROQ_API_KEY) {
+    try {
+      return await params.runGroq(
+        GROQ_API_KEY,
+        GROQ_MODEL,
+        createAttemptSignal(GROQ_PRIMARY_ONLY_TIMEOUT_MS, params.callerSignal),
+      );
+    } catch (error) {
+      if (
+        !params.callerSignal?.aborted &&
+        GROQ_MODEL !== GROQ_FALLBACK_MODEL &&
+        isTransientGroqError(error)
+      ) {
+        params.onReset?.();
+        return params.runGroq(
+          GROQ_API_KEY,
+          GROQ_FALLBACK_MODEL,
+          createAttemptSignal(
+            GROQ_FALLBACK_ONLY_TIMEOUT_MS,
+            params.callerSignal,
+          ),
+        );
+      }
+      throw error;
+    }
+  }
+
+  if (GEMINI_API_KEY) {
+    return attemptGemini();
+  }
+
+  throw new Error("No AI provider API key is configured.");
+}
+
 export type EnrichWordOptions = {
   signal?: AbortSignal;
 };
@@ -278,24 +381,26 @@ export async function enrichWordWithGemini(
   referenceJson?: string | null,
   options?: EnrichWordOptions,
 ): Promise<DictionaryResponseDTO> {
-  const { GEMINI_API_KEY, GEMINI_MODEL } = getServerEnv();
-  const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-  const contents = buildDictionaryUserPrompt(term, referenceJson);
-
-  const rawText = await executeWithFallback(
-    GEMINI_MODEL,
-    options?.signal,
-    async (model, abortSignal) => {
+  return routeWithFailover({
+    callerSignal: options?.signal,
+    runGroq: (apiKey, model, abortSignal) =>
+      enrichWithGroq({
+        apiKey,
+        model,
+        term,
+        referenceJson,
+        signal: abortSignal,
+      }),
+    runGemini: async (apiKey, model, abortSignal) => {
+      const ai = new GoogleGenAI({ apiKey });
       const response = await ai.models.generateContent({
         model,
-        contents,
+        contents: buildDictionaryUserPrompt(term, referenceJson),
         config: buildGeminiConfig(model, abortSignal),
       });
-      return response.text;
+      return parseAndValidateGeminiJson(response.text);
     },
-  );
-
-  return parseAndValidateGeminiJson(rawText);
+  });
 }
 
 export type StreamWordOptions = {
@@ -309,17 +414,23 @@ export async function streamWordWithGemini(
   term: string,
   options?: StreamWordOptions,
 ): Promise<DictionaryResponseDTO> {
-  const { GEMINI_API_KEY, GEMINI_MODEL } = getServerEnv();
-  const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-  const contents = buildDictionaryUserPrompt(term, options?.referenceJson);
-
-  const rawText = await executeWithFallback(
-    GEMINI_MODEL,
-    options?.signal,
-    async (model, abortSignal) => {
+  return routeWithFailover({
+    callerSignal: options?.signal,
+    onReset: options?.onReset,
+    runGroq: (apiKey, model, abortSignal) =>
+      streamWithGroq({
+        apiKey,
+        model,
+        term,
+        referenceJson: options?.referenceJson,
+        signal: abortSignal,
+        onChunk: options?.onChunk,
+      }),
+    runGemini: async (apiKey, model, abortSignal) => {
+      const ai = new GoogleGenAI({ apiKey });
       const stream = await ai.models.generateContentStream({
         model,
-        contents,
+        contents: buildDictionaryUserPrompt(term, options?.referenceJson),
         config: buildGeminiConfig(model, abortSignal),
       });
 
@@ -333,10 +444,10 @@ export async function streamWordWithGemini(
           options?.onChunk?.(accumulated);
         }
       }
-      return accumulated;
+      return parseAndValidateGeminiJson(accumulated);
     },
-    options?.onReset,
-  );
-
-  return parseAndValidateGeminiJson(rawText);
+  });
 }
+
+export const enrichWordWithAi = enrichWordWithGemini;
+export const streamWordWithAi = streamWordWithGemini;

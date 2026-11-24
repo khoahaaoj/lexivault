@@ -6,11 +6,15 @@ vi.mock("server-only", () => ({}));
 const {
   mockGenerateContent,
   mockGenerateContentStream,
+  mockEnrichWithGroq,
+  mockStreamWithGroq,
   mockGetServerEnv,
   mockConstructorArgs,
 } = vi.hoisted(() => ({
   mockGenerateContent: vi.fn(),
   mockGenerateContentStream: vi.fn(),
+  mockEnrichWithGroq: vi.fn(),
+  mockStreamWithGroq: vi.fn(),
   mockGetServerEnv: vi.fn(),
   mockConstructorArgs: vi.fn(),
 }));
@@ -18,6 +22,25 @@ const {
 vi.mock("@/lib/env/server", () => ({
   getServerEnv: mockGetServerEnv,
 }));
+
+vi.mock("@/lib/ai/groq-provider", () => {
+  class MockGroqApiError extends Error {
+    readonly status: number;
+    constructor(status: number, message: string) {
+      super(message);
+      this.name = "GroqApiError";
+      this.status = status;
+    }
+  }
+  return {
+    GROQ_FALLBACK_MODEL: "openai/gpt-oss-20b",
+    GroqApiError: MockGroqApiError,
+    enrichWithGroq: mockEnrichWithGroq,
+    streamWithGroq: mockStreamWithGroq,
+  };
+});
+
+import { GROQ_FALLBACK_MODEL, GroqApiError } from "@/lib/ai/groq-provider";
 
 vi.mock("@google/genai", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@google/genai")>();
@@ -185,6 +208,10 @@ describe("supportsMinimalThinking & isTransientGeminiError", () => {
 describe("enrichWordWithGemini", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGenerateContent.mockReset();
+    mockGenerateContentStream.mockReset();
+    mockEnrichWithGroq.mockReset();
+    mockStreamWithGroq.mockReset();
     mockGetServerEnv.mockReturnValue({
       GEMINI_API_KEY: "test-gemini-key",
       GEMINI_MODEL: "gemini-3.5-flash-lite",
@@ -290,6 +317,10 @@ describe("enrichWordWithGemini", () => {
 describe("streamWordWithGemini", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGenerateContent.mockReset();
+    mockGenerateContentStream.mockReset();
+    mockEnrichWithGroq.mockReset();
+    mockStreamWithGroq.mockReset();
     mockGetServerEnv.mockReturnValue({
       GEMINI_API_KEY: "test-gemini-key",
       GEMINI_MODEL: "gemini-3.5-flash-lite",
@@ -363,6 +394,102 @@ describe("streamWordWithGemini", () => {
       FALLBACK_GEMINI_MODEL,
     );
     expect(chunks).toEqual(['{"is_valid":true,', json]);
+    expect(result).toEqual(validResponse);
+  });
+});
+
+describe("multi-provider Groq -> Gemini failover router", () => {
+  const validResponse = {
+    is_valid: true,
+    suggestion: null,
+    entries: [SAMPLE_ENTRY],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGenerateContent.mockReset();
+    mockGenerateContentStream.mockReset();
+    mockEnrichWithGroq.mockReset();
+    mockStreamWithGroq.mockReset();
+    mockGetServerEnv.mockReturnValue({
+      GROQ_API_KEY: "gsk_test",
+      GROQ_MODEL: "openai/gpt-oss-120b",
+      GEMINI_API_KEY: "gemini-key",
+      GEMINI_MODEL: "gemini-3.5-flash-lite",
+    });
+  });
+
+  it("uses Groq primary when both keys are set without calling Gemini", async () => {
+    mockEnrichWithGroq.mockResolvedValue(validResponse);
+
+    const result = await enrichWordWithGemini("mitigate");
+
+    expect(result).toEqual(validResponse);
+    expect(mockEnrichWithGroq).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiKey: "gsk_test",
+        model: "openai/gpt-oss-120b",
+        term: "mitigate",
+      }),
+    );
+    expect(mockGenerateContent).not.toHaveBeenCalled();
+  });
+
+  it("fails over automatically to Gemini when Groq returns 429 or 503", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockEnrichWithGroq.mockRejectedValue(new GroqApiError(429, "rate limit"));
+    mockGenerateContent.mockResolvedValue({
+      text: JSON.stringify(validResponse),
+    });
+
+    const result = await enrichWordWithGemini("mitigate");
+
+    expect(result).toEqual(validResponse);
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    warnSpy.mockRestore();
+  });
+
+  it("invokes onReset and fails over streaming from Groq to Gemini on 503", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockStreamWithGroq.mockRejectedValue(new GroqApiError(503, "busy"));
+    const json = JSON.stringify(validResponse);
+    mockGenerateContentStream.mockResolvedValue(
+      (async function* () {
+        yield { text: json };
+      })(),
+    );
+
+    const onReset = vi.fn();
+    const chunks: string[] = [];
+    const result = await streamWordWithGemini("mitigate", {
+      onChunk: (acc) => chunks.push(acc),
+      onReset,
+    });
+
+    expect(onReset).toHaveBeenCalledTimes(1);
+    expect(chunks).toEqual([json]);
+    expect(result).toEqual(validResponse);
+    warnSpy.mockRestore();
+  });
+
+  it("falls back to openai/gpt-oss-20b when only GROQ_API_KEY is configured and primary returns 429", async () => {
+    mockGetServerEnv.mockReturnValue({
+      GROQ_API_KEY: "gsk_test",
+      GROQ_MODEL: "openai/gpt-oss-120b",
+      GEMINI_API_KEY: undefined,
+      GEMINI_MODEL: "gemini-3.5-flash-lite",
+    });
+
+    mockEnrichWithGroq
+      .mockRejectedValueOnce(new GroqApiError(429, "rate limit"))
+      .mockResolvedValueOnce(validResponse);
+
+    const result = await enrichWordWithGemini("mitigate");
+
+    expect(mockEnrichWithGroq).toHaveBeenCalledTimes(2);
+    expect(mockEnrichWithGroq.mock.calls[1]?.[0]?.model).toBe(
+      GROQ_FALLBACK_MODEL,
+    );
     expect(result).toEqual(validResponse);
   });
 });

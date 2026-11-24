@@ -88,9 +88,48 @@ export type SrsCardUpdate = Partial<
   Omit<SrsCardInsert, "id" | "user_id" | "entry_id">
 >;
 
+export type DictionaryCacheSense = {
+  word: string;
+  part_of_speech: string;
+  cefr_level: CefrLevel;
+  ipa_uk: string;
+  ipa_us: string;
+  audio_uk_url: string | null;
+  audio_us_url: string | null;
+  definition_en: string;
+  explanation_vi: string;
+  nuance_note_vi: string;
+  collocations: Collocation[];
+  synonyms: Synonym[];
+  antonyms: Antonym[];
+  examples: ExampleSentence[];
+};
+
+export type DictionaryCacheRow = {
+  term: string;
+  entries: DictionaryCacheSense[];
+  updated_at: string;
+};
+
+export type DictionaryCacheInsert = {
+  term: string;
+  entries: DictionaryCacheSense[];
+  updated_at?: string;
+};
+
+export type DictionaryCacheUpdate = Partial<
+  Omit<DictionaryCacheInsert, "term">
+>;
+
 export type Database = {
   public: {
     Tables: {
+      dictionary_cache: {
+        Row: DictionaryCacheRow;
+        Insert: DictionaryCacheInsert;
+        Update: DictionaryCacheUpdate;
+        Relationships: [];
+      };
       entries: {
         Row: EntryRow;
         Insert: EntryInsert;

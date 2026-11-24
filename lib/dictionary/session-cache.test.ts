@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CACHE_TTL_MS,
   clearLookupSessionCache,
   getCachedLookup,
   markCachedEntrySaved,
@@ -62,21 +63,33 @@ function makeLookupResponse(word: string, pos = "verb"): LookupApiResponse {
   };
 }
 
-describe("session-cache", () => {
+describe("session-cache (L1 persistent localStorage LRU)", () => {
+  let localStorageMock: Storage;
+
   beforeEach(() => {
-    vi.stubGlobal("window", { sessionStorage: makeStorageMock() });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-24T12:00:00Z"));
+    localStorageMock = makeStorageMock();
+    vi.stubGlobal("window", {
+      localStorage: localStorageMock,
+      sessionStorage: makeStorageMock(),
+    });
     clearLookupSessionCache();
   });
 
   afterEach(() => {
     clearLookupSessionCache();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
-  it("normalizes lookup keys across whitespace and case", () => {
+  it("normalizes lookup keys and persists to localStorage", () => {
     const payload = makeLookupResponse("mitigate");
     setCachedLookup("  MITIGATE  ", payload);
 
+    expect(
+      localStorageMock.getItem("lexivault:lookup-cache:v2"),
+    ).not.toBeNull();
     expect(getCachedLookup("mitigate")).toEqual(payload);
     expect(getCachedLookup("  MiTiGaTe ")).toEqual(payload);
   });
@@ -101,11 +114,11 @@ describe("session-cache", () => {
     expect(getCachedLookup("empty")).toBeNull();
   });
 
-  it("enforces LRU eviction beyond 50 entries", () => {
-    const words = Array.from({ length: 50 }, (_, index) => {
-      const codeA = String.fromCharCode(97 + Math.floor(index / 26));
-      const codeB = String.fromCharCode(97 + (index % 26));
-      return `word${codeA}${codeB}`;
+  it("enforces LRU eviction beyond 200 entries", () => {
+    const words = Array.from({ length: 200 }, (_, index) => {
+      const a = String.fromCharCode(97 + Math.floor(index / 26));
+      const b = String.fromCharCode(97 + (index % 26));
+      return `word${a}${b}`;
     });
 
     for (const word of words) {
@@ -120,6 +133,14 @@ describe("session-cache", () => {
     expect(getCachedLookup(words[0])).not.toBeNull();
     expect(getCachedLookup(words[1])).toBeNull();
     expect(getCachedLookup("newestword")).not.toBeNull();
+  });
+
+  it("expires entries older than 30 days", () => {
+    setCachedLookup("ubiquitous", makeLookupResponse("ubiquitous"));
+    expect(getCachedLookup("ubiquitous")).not.toBeNull();
+
+    vi.advanceTimersByTime(CACHE_TTL_MS + 1000);
+    expect(getCachedLookup("ubiquitous")).toBeNull();
   });
 
   it("propagates saved status across matching (word, part_of_speech) entries", () => {
@@ -138,7 +159,7 @@ describe("session-cache", () => {
     expect(hit2?.entries[0]?.srs_card_id).toBe("card-456");
   });
 
-  it("falls back safely when sessionStorage throws or window is absent", () => {
+  it("falls back safely when browser storage throws or window is absent", () => {
     vi.stubGlobal("window", undefined);
     clearLookupSessionCache();
     setCachedLookup("ubiquitous", makeLookupResponse("ubiquitous"));
@@ -160,7 +181,7 @@ describe("session-cache", () => {
         throw new Error("QuotaExceededError");
       },
     };
-    vi.stubGlobal("window", { sessionStorage: throwingStorage });
+    vi.stubGlobal("window", { localStorage: throwingStorage });
     clearLookupSessionCache();
     expect(() =>
       setCachedLookup("resilient", makeLookupResponse("resilient")),

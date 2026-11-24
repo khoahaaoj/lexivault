@@ -3,20 +3,40 @@ import {
   type LookupApiResponse,
 } from "@/lib/dictionary/validation";
 
-const STORAGE_KEY = "lexivault:lookup-cache:v1";
-const MAX_CACHE_ENTRIES = 50;
+const STORAGE_KEY = "lexivault:lookup-cache:v2";
+const MAX_CACHE_ENTRIES = 200;
+export const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-const memoryStore = new Map<string, LookupApiResponse>();
+type CacheRecord = {
+  response: LookupApiResponse;
+  cachedAt: number;
+};
+
+const memoryStore = new Map<string, CacheRecord>();
 let hasHydrated = false;
 
-function getSessionStorage(): Storage | null {
+function getBrowserStorage(): Storage | null {
   try {
     if (typeof window === "undefined") {
       return null;
     }
-    return window.sessionStorage ?? null;
+    return window.localStorage ?? window.sessionStorage ?? null;
   } catch {
     return null;
+  }
+}
+
+function isExpired(record: CacheRecord, now = Date.now()): boolean {
+  return now - record.cachedAt > CACHE_TTL_MS;
+}
+
+function evictOverflow(): void {
+  while (memoryStore.size > MAX_CACHE_ENTRIES) {
+    const oldestKey = memoryStore.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    memoryStore.delete(oldestKey);
   }
 }
 
@@ -26,7 +46,7 @@ function hydrateStore(): void {
   }
   hasHydrated = true;
 
-  const storage = getSessionStorage();
+  const storage = getBrowserStorage();
   if (!storage) {
     return;
   }
@@ -41,6 +61,7 @@ function hydrateStore(): void {
       return;
     }
 
+    const now = Date.now();
     for (const item of parsed) {
       if (
         Array.isArray(item) &&
@@ -49,27 +70,29 @@ function hydrateStore(): void {
         item[1] &&
         typeof item[1] === "object"
       ) {
+        const record = item[1] as Partial<CacheRecord>;
         const key = normalizeLookupTerm(item[0]);
-        if (key) {
-          memoryStore.set(key, item[1] as LookupApiResponse);
+        if (
+          key &&
+          typeof record.cachedAt === "number" &&
+          Number.isFinite(record.cachedAt) &&
+          record.response &&
+          typeof record.response === "object" &&
+          !isExpired(record as CacheRecord, now)
+        ) {
+          memoryStore.set(key, record as CacheRecord);
         }
       }
     }
 
-    while (memoryStore.size > MAX_CACHE_ENTRIES) {
-      const oldestKey = memoryStore.keys().next().value;
-      if (oldestKey === undefined) {
-        break;
-      }
-      memoryStore.delete(oldestKey);
-    }
+    evictOverflow();
   } catch {
-    // Corrupted or blocked sessionStorage should fall back cleanly to memory.
+    // Corrupted or blocked browser storage should fall back cleanly to memory.
   }
 }
 
 function persistStore(): void {
-  const storage = getSessionStorage();
+  const storage = getBrowserStorage();
   if (!storage) {
     return;
   }
@@ -96,11 +119,17 @@ export function getCachedLookup(term: string): LookupApiResponse | null {
     return null;
   }
 
-  // Refresh LRU position.
+  if (isExpired(hit)) {
+    memoryStore.delete(key);
+    persistStore();
+    return null;
+  }
+
+  // Refresh LRU position without extending expiry unnecessarily or refresh cleanly.
   memoryStore.delete(key);
   memoryStore.set(key, hit);
   persistStore();
-  return hit;
+  return hit.response;
 }
 
 export function setCachedLookup(
@@ -120,16 +149,12 @@ export function setCachedLookup(
   if (memoryStore.has(key)) {
     memoryStore.delete(key);
   }
-  memoryStore.set(key, response);
+  memoryStore.set(key, {
+    response,
+    cachedAt: Date.now(),
+  });
 
-  while (memoryStore.size > MAX_CACHE_ENTRIES) {
-    const oldestKey = memoryStore.keys().next().value;
-    if (oldestKey === undefined) {
-      break;
-    }
-    memoryStore.delete(oldestKey);
-  }
-
+  evictOverflow();
   persistStore();
 }
 
@@ -147,9 +172,9 @@ export function markCachedEntrySaved(
   hydrateStore();
   let changed = false;
 
-  for (const [key, cached] of memoryStore.entries()) {
+  for (const [key, record] of memoryStore.entries()) {
     let matchedInResponse = false;
-    const updatedEntries = cached.entries.map((entry) => {
+    const updatedEntries = record.response.entries.map((entry) => {
       const sameSense =
         normalizeLookupTerm(entry.word) === targetWord &&
         entry.part_of_speech.trim().toLowerCase() === targetPos;
@@ -167,7 +192,10 @@ export function markCachedEntrySaved(
 
     if (matchedInResponse) {
       changed = true;
-      memoryStore.set(key, { ...cached, entries: updatedEntries });
+      memoryStore.set(key, {
+        ...record,
+        response: { ...record.response, entries: updatedEntries },
+      });
     }
   }
 
@@ -179,7 +207,7 @@ export function markCachedEntrySaved(
 export function clearLookupSessionCache(): void {
   memoryStore.clear();
   hasHydrated = false;
-  const storage = getSessionStorage();
+  const storage = getBrowserStorage();
   if (!storage) {
     return;
   }
